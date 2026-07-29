@@ -1,0 +1,75 @@
+{
+  "enabled": true,
+  "applicable_countries": [
+    "アメリカ"
+  ],
+  "applicable_carriers": [
+    "日本郵便"
+  ],
+  "applicable_services": [
+    "EMS",
+    "国際エアパケット",
+    "小形包装物",
+    "国際小包"
+  ],
+  "duty": {
+    "rate_percent": 10.0,
+    "base": "product_price_yen",
+    "effective_from": "2026-07-12",
+    "effective_to": ""
+  },
+  "fee": {
+    "base": "product_price_yen_plus_shipping",
+    "rounding": "half_up",
+    "above_max": "use_last_rate",
+    "effective_from": "2026-07-12",
+    "effective_to": "",
+    "points": [
+      {
+        "amountJpy": 2000,
+        "ratePercent": 30.0
+      },
+      {
+        "amountJpy": 2500,
+        "ratePercent": 24.0
+      },
+      {
+        "amountJpy": 3000,
+        "ratePercent": 20.0
+      },
+      {
+        "amountJpy": 4000,
+        "ratePercent": 15.0
+      },
+      {
+        "amountJpy": 5000,
+        "ratePercent": 12.0
+      },
+      {
+        "amountJpy": 6000,
+        "ratePercent": 10.0
+      },
+      {
+        "amountJpy": 7000,
+        "ratePercent": 9.0
+      },
+      {
+        "amountJpy": 8000,
+        "ratePercent": 8.0
+      },
+      {
+        "amountJpy": 10000,
+        "ratePercent": 6.83
+      },
+      {
+        "amountJpy": 15000,
+        "ratePercent": 4.89
+      },
+      {
+        "amountJpy": 20000,
+        "ratePercent": 3.91
+      }
+    ]
+  },
+  "note": "US-bound Japan Post shipments use Zonos Prepay with Section 122 duty."
+}

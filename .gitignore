@@ -1,0 +1,48 @@
+# Authentication, API keys, database tokens, and local environment files
+.streamlit/secrets.toml
+**/.streamlit/secrets.toml
+**/.streamlit/*secrets*.toml
+**/.streamlit/*credentials*.txt
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Transaction data and local databases must never be published to GitHub
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# Mutable runtime state
+runtime_logs/
+**/logs/
+**/registration_event.json
+**/exchange_rate.json
+*.log
+
+# Local backups and restored copies
+*.zip
+recovery_backups/
+EB_research_plus_latest_restored_*/
+
+# Python and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp_*/
+.venv/
+venv/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
