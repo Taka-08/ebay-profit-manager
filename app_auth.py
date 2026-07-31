@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 from typing import Any
 
 import streamlit as st
+from streamlit_js_eval import streamlit_js_eval
 
 
 PASSWORD_ENV = "EBAY_TOOL_PASSWORD"
@@ -22,6 +24,10 @@ USERNAME_SECRET = "APP_USERNAME"
 REQUIRE_AUTH_SECRET = "REQUIRE_AUTH"
 
 SESSION_KEY = "_ebay_tool_authenticated"
+BROWSER_SESSION_WRITE_PENDING_KEY = "_ebay_tool_browser_write_pending"
+BROWSER_SESSION_DELETE_PENDING_KEY = "_ebay_tool_browser_delete_pending"
+BROWSER_SESSION_DISABLED_KEY = "_ebay_tool_browser_session_disabled"
+BROWSER_STORAGE_KEY = "ebay_tool_authenticated_session"
 PBKDF2_ALGORITHM = "pbkdf2_sha256"
 INSECURE_PLACEHOLDERS = {
     "change-this-password",
@@ -184,6 +190,69 @@ def _credentials_match(username: str, password: str) -> bool:
     return hmac.compare_digest(password, configured_password())
 
 
+def _session_token() -> str:
+    """Create a signed token that becomes invalid when credentials change."""
+    fingerprint = _credential_fingerprint()
+    credential_material = configured_password_hash() or hashlib.sha256(
+        configured_password().encode("utf-8")
+    ).hexdigest()
+    signing_key = hashlib.sha256(
+        (
+            "ebay-tool-browser-session\0"
+            f"{configured_username()}\0{credential_material}"
+        ).encode("utf-8")
+    ).digest()
+    signature = hmac.new(
+        signing_key,
+        fingerprint.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"v1.{fingerprint}.{signature}"
+
+
+def _session_token_is_valid(token: str | None) -> bool:
+    if not token:
+        return False
+    return hmac.compare_digest(str(token), _session_token())
+
+
+def _read_browser_session() -> str:
+    value = streamlit_js_eval(
+        js_expressions=(
+            f"window.parent.sessionStorage.getItem("
+            f"{json.dumps(BROWSER_STORAGE_KEY)})"
+        ),
+        key="ebay_auth_session_read",
+        default="",
+    )
+    result = "" if value is None else str(value)
+    return result
+
+
+def _write_browser_session(token: str) -> None:
+    expression = (
+        f"window.parent.sessionStorage.setItem("
+        f"{json.dumps(BROWSER_STORAGE_KEY)}, "
+        f"{json.dumps(token)}); true"
+    )
+    streamlit_js_eval(
+        js_expressions=expression,
+        key="ebay_auth_session_write",
+        default=False,
+    )
+
+
+def _delete_browser_session() -> None:
+    streamlit_js_eval(
+        js_expressions=(
+            f"window.parent.sessionStorage.removeItem("
+            f"{json.dumps(BROWSER_STORAGE_KEY)}); true"
+        ),
+        key="ebay_auth_session_delete",
+        default=False,
+    )
+
+
 def require_app_password() -> None:
     """Stop all application rendering until authentication succeeds."""
     if not authentication_is_required():
@@ -198,31 +267,63 @@ def require_app_password() -> None:
         st.stop()
 
     expected_fingerprint = _credential_fingerprint()
-    if hmac.compare_digest(
+    logout_pending = bool(
+        st.session_state.pop(BROWSER_SESSION_DELETE_PENDING_KEY, False)
+    )
+    if logout_pending:
+        st.session_state[BROWSER_SESSION_DISABLED_KEY] = True
+        _delete_browser_session()
+
+    session_is_authenticated = hmac.compare_digest(
         str(st.session_state.get(SESSION_KEY, "")),
         expected_fingerprint,
+    )
+    if (
+        not session_is_authenticated
+        and not logout_pending
+        and not st.session_state.get(BROWSER_SESSION_DISABLED_KEY, False)
+        and _session_token_is_valid(_read_browser_session())
     ):
+        st.session_state[SESSION_KEY] = expected_fingerprint
+        session_is_authenticated = True
+
+    if session_is_authenticated:
+        if st.session_state.pop(BROWSER_SESSION_WRITE_PENDING_KEY, False):
+            _write_browser_session(_session_token())
         if st.sidebar.button("ログアウト", key="app_logout", width="stretch"):
             st.session_state.pop(SESSION_KEY, None)
             st.session_state.pop("app_login_password", None)
+            st.session_state[BROWSER_SESSION_DELETE_PENDING_KEY] = True
             st.rerun()
         return
 
     st.title("ログイン")
     st.caption("認証された利用者だけがこのツールと保存データを利用できます。")
-    entered_username = st.text_input(
-        "ユーザー名",
-        value=configured_username(),
-        key="app_login_username",
-    )
-    entered_password = st.text_input(
-        "パスワード",
-        type="password",
-        key="app_login_password",
-    )
-    if st.button("ログイン", key="app_login_button", width="stretch"):
+    with st.form(
+        "app_login_form",
+        clear_on_submit=False,
+        enter_to_submit=True,
+    ):
+        entered_username = st.text_input(
+            "ユーザー名",
+            value=configured_username(),
+            key="app_login_username",
+        )
+        entered_password = st.text_input(
+            "パスワード",
+            type="password",
+            key="app_login_password",
+        )
+        submitted = st.form_submit_button(
+            "ログイン",
+            key="app_login_button",
+            width="stretch",
+        )
+    if submitted:
         if _credentials_match(entered_username, entered_password):
             st.session_state[SESSION_KEY] = expected_fingerprint
+            st.session_state[BROWSER_SESSION_WRITE_PENDING_KEY] = True
+            st.session_state.pop(BROWSER_SESSION_DISABLED_KEY, None)
             st.rerun()
         st.error("ユーザー名またはパスワードが正しくありません。")
     st.stop()

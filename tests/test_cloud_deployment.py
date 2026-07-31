@@ -45,6 +45,26 @@ class CloudDeploymentTest(unittest.TestCase):
         )
         self.assertFalse(app_auth._verify_password("wrong", password_hash))
 
+    def test_browser_session_token_is_signed_and_credential_bound(self) -> None:
+        environment = {
+            "EBAY_TOOL_USERNAME": "cloud-user",
+            "EBAY_TOOL_PASSWORD": "long-test-password",
+            "EBAY_TOOL_PASSWORD_HASH": "",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            token = app_auth._session_token()
+            self.assertTrue(app_auth._session_token_is_valid(token))
+            self.assertFalse(
+                app_auth._session_token_is_valid(f"{token[:-1]}0")
+            )
+
+        with patch.dict(
+            os.environ,
+            {**environment, "EBAY_TOOL_PASSWORD": "changed-password"},
+            clear=False,
+        ):
+            self.assertFalse(app_auth._session_token_is_valid(token))
+
     def test_remote_database_requires_authentication(self) -> None:
         with patch.dict(
             os.environ,
