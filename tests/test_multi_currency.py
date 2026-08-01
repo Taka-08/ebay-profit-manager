@@ -307,11 +307,27 @@ class MultiCurrencyTest(unittest.TestCase):
             ).set_value(2000.0)
             manager.run(timeout=60)
             self.assertEqual([], list(manager.exception))
-            order_revenue_metric = self.element_with_label(
-                manager.metric,
+            order_revenue_input = self.element_with_label(
+                manager.number_input,
                 "注文の収益（円）",
             )
-            self.assertEqual("5,205 円", order_revenue_metric.value)
+            self.assertEqual(5205.0, order_revenue_input.value)
+            self.assertTrue(
+                any(
+                    "注文の収益（USD）: $34.70" in caption.value
+                    for caption in manager.caption
+                )
+            )
+
+            order_revenue_input.set_value(5000.0)
+            manager.run(timeout=60)
+            self.assertEqual([], list(manager.exception))
+            self.assertTrue(
+                any(
+                    "注文の収益（USD）: $33.33" in caption.value
+                    for caption in manager.caption
+                )
+            )
 
             self.element_with_label(manager.button, "更新").click()
             manager.run(timeout=60)
@@ -338,9 +354,9 @@ class MultiCurrencyTest(unittest.TestCase):
         self.assertEqual(RATES["GBP"], actual[4])
         self.assertEqual(RATES["USD"], actual[5])
         self.assertEqual(manager_app.ACTUAL_FEE_SCHEMA_SEPARATE, actual[6])
-        self.assertEqual(5205.0, actual[7])
+        self.assertEqual(5000.0, actual[7])
         expected_actual_profit = (
-            5205.0 - 1000.0 - 2000.0 - 20.0 - 30.0 - 50.0 - actual[8]
+            5000.0 - 1000.0 - 2000.0 - 20.0 - 30.0 - 50.0 - actual[8]
         )
         self.assertEqual(expected_actual_profit, actual[9])
         self.assertAlmostEqual(expected_actual_profit / 5700.0 * 100, actual[10])
@@ -359,6 +375,13 @@ class MultiCurrencyTest(unittest.TestCase):
         self.assertEqual(150.0, aggregate["広告費合計"])
         self.assertEqual(45.0, aggregate["固定手数料合計"])
         self.assertEqual(expected_actual_profit, aggregate["実利益合計"])
+
+    def test_order_revenue_usd_uses_actual_usd_jpy_rate(self) -> None:
+        self.assertAlmostEqual(
+            16.7534942821,
+            manager_app.calculate_order_revenue_usd(2637.0, 157.40),
+        )
+        self.assertIsNone(manager_app.calculate_order_revenue_usd(2637.0, 0.0))
 
     def test_legacy_row_is_kept_and_defaults_to_usd(self) -> None:
         self.manager_dir.mkdir(parents=True, exist_ok=True)

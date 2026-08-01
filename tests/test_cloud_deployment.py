@@ -65,6 +65,16 @@ class CloudDeploymentTest(unittest.TestCase):
         ):
             self.assertFalse(app_auth._session_token_is_valid(token))
 
+    def test_browser_session_writer_persists_session_cookie(self) -> None:
+        with patch.object(app_auth, "streamlit_js_eval") as js_eval:
+            app_auth._write_browser_session("signed-token")
+
+        expression = js_eval.call_args.kwargs["js_expressions"]
+        self.assertIn("sessionStorage.setItem", expression)
+        self.assertIn("document.cookie", expression)
+        self.assertIn("SameSite=Strict", expression)
+        self.assertIn("Secure", expression)
+
     def test_remote_database_requires_authentication(self) -> None:
         with patch.dict(
             os.environ,
@@ -144,6 +154,35 @@ class CloudDeploymentTest(unittest.TestCase):
         self.assertTrue(
             (workspace / "ebay_listing_manager" / "ebay_listings.sqlite3").exists()
         )
+
+    def test_valid_request_cookie_skips_login_form_before_render(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="ebay-cookie-auth-test-"))
+        environment = {
+            "EBAY_TOOL_WORKSPACE": str(workspace),
+            "EBAY_REQUIRE_AUTH": "true",
+            "EBAY_TOOL_USERNAME": "cloud-user",
+            "EBAY_TOOL_PASSWORD": "long-test-password",
+            "EBAY_TOOL_PASSWORD_HASH": "",
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            token = app_auth._session_token()
+            with (
+                patch.object(app_auth, "_read_browser_cookie", return_value=token),
+                patch.object(app_auth, "_write_browser_session"),
+                patch.object(app_auth, "_scroll_browser_to_top") as scroll_to_top,
+            ):
+                manager = AppTest.from_file(str(MANAGER_APP)).run(timeout=20)
+
+        self.assertFalse(manager.exception)
+        self.assertFalse(
+            any(item.label == "ログイン" for item in manager.button)
+        )
+        self.assertTrue(
+            any("ダッシュボード" in item.value for item in manager.subheader)
+        )
+        scroll_to_top.assert_called_once_with()
 
     def test_local_database_remains_sqlite_compatible(self) -> None:
         path = Path(tempfile.mkdtemp(prefix="ebay-db-test-")) / "listings.sqlite3"

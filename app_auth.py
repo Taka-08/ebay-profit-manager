@@ -27,6 +27,7 @@ SESSION_KEY = "_ebay_tool_authenticated"
 BROWSER_SESSION_WRITE_PENDING_KEY = "_ebay_tool_browser_write_pending"
 BROWSER_SESSION_DELETE_PENDING_KEY = "_ebay_tool_browser_delete_pending"
 BROWSER_SESSION_DISABLED_KEY = "_ebay_tool_browser_session_disabled"
+BROWSER_SESSION_COOKIE_SYNCED_KEY = "_ebay_tool_browser_cookie_synced"
 BROWSER_STORAGE_KEY = "ebay_tool_authenticated_session"
 PBKDF2_ALGORITHM = "pbkdf2_sha256"
 INSECURE_PLACEHOLDERS = {
@@ -216,7 +217,19 @@ def _session_token_is_valid(token: str | None) -> bool:
     return hmac.compare_digest(str(token), _session_token())
 
 
+def _read_browser_cookie() -> str:
+    """Read the signed session cookie before rendering the login form."""
+    try:
+        value = st.context.cookies.get(BROWSER_STORAGE_KEY, "")
+    except (AttributeError, RuntimeError):
+        return ""
+    return "" if value is None else str(value)
+
+
 def _read_browser_session() -> str:
+    cookie_token = _read_browser_cookie()
+    if cookie_token:
+        return cookie_token
     value = streamlit_js_eval(
         js_expressions=(
             f"window.parent.sessionStorage.getItem("
@@ -230,10 +243,15 @@ def _read_browser_session() -> str:
 
 
 def _write_browser_session(token: str) -> None:
+    cookie_value = f"{BROWSER_STORAGE_KEY}={token}; Path=/; SameSite=Strict"
     expression = (
         f"window.parent.sessionStorage.setItem("
         f"{json.dumps(BROWSER_STORAGE_KEY)}, "
-        f"{json.dumps(token)}); true"
+        f"{json.dumps(token)}); "
+        f"window.parent.document.cookie = "
+        f"{json.dumps(cookie_value)} + "
+        "(window.parent.location.protocol === 'https:' ? '; Secure' : ''); "
+        "true"
     )
     streamlit_js_eval(
         js_expressions=expression,
@@ -243,12 +261,27 @@ def _write_browser_session(token: str) -> None:
 
 
 def _delete_browser_session() -> None:
+    cookie_value = (
+        f"{BROWSER_STORAGE_KEY}=; Path=/; SameSite=Strict; Max-Age=0"
+    )
     streamlit_js_eval(
         js_expressions=(
             f"window.parent.sessionStorage.removeItem("
-            f"{json.dumps(BROWSER_STORAGE_KEY)}); true"
+            f"{json.dumps(BROWSER_STORAGE_KEY)}); "
+            f"window.parent.document.cookie = "
+            f"{json.dumps(cookie_value)} + "
+            "(window.parent.location.protocol === 'https:' ? '; Secure' : ''); "
+            "true"
         ),
         key="ebay_auth_session_delete",
+        default=False,
+    )
+
+
+def _scroll_browser_to_top() -> None:
+    streamlit_js_eval(
+        js_expressions="window.parent.scrollTo({top: 0, left: 0, behavior: 'auto'}); true",
+        key="ebay_auth_scroll_to_top",
         default=False,
     )
 
@@ -278,6 +311,7 @@ def require_app_password() -> None:
         str(st.session_state.get(SESSION_KEY, "")),
         expected_fingerprint,
     )
+    restored_browser_session = False
     if (
         not session_is_authenticated
         and not logout_pending
@@ -286,13 +320,25 @@ def require_app_password() -> None:
     ):
         st.session_state[SESSION_KEY] = expected_fingerprint
         session_is_authenticated = True
+        restored_browser_session = True
 
     if session_is_authenticated:
-        if st.session_state.pop(BROWSER_SESSION_WRITE_PENDING_KEY, False):
+        write_pending = st.session_state.pop(
+            BROWSER_SESSION_WRITE_PENDING_KEY,
+            False,
+        )
+        if write_pending or not st.session_state.get(
+            BROWSER_SESSION_COOKIE_SYNCED_KEY,
+            False,
+        ):
             _write_browser_session(_session_token())
+            st.session_state[BROWSER_SESSION_COOKIE_SYNCED_KEY] = True
+        if restored_browser_session:
+            _scroll_browser_to_top()
         if st.sidebar.button("ログアウト", key="app_logout", width="stretch"):
             st.session_state.pop(SESSION_KEY, None)
             st.session_state.pop("app_login_password", None)
+            st.session_state.pop(BROWSER_SESSION_COOKIE_SYNCED_KEY, None)
             st.session_state[BROWSER_SESSION_DELETE_PENDING_KEY] = True
             st.rerun()
         return

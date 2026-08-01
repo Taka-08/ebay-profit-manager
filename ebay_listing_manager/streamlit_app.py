@@ -762,6 +762,19 @@ def calculate_order_revenue_yen(
     return order_total_yen - usd_fees_yen
 
 
+def calculate_order_revenue_usd(
+    order_revenue_yen: float,
+    usd_jpy_exchange_rate: float,
+) -> float | None:
+    if usd_jpy_exchange_rate <= 0:
+        return None
+    return order_revenue_yen / usd_jpy_exchange_rate
+
+
+def mark_order_revenue_as_manual(manual_state_key: str) -> None:
+    st.session_state[manual_state_key] = True
+
+
 def calculate_actual_profit(
     row: dict[str, object],
     exchange_rate: float,
@@ -812,15 +825,17 @@ def calculate_actual_profit(
             - resolved_cost("actual_parts_cost_yen", "parts_cost_yen")
         )
 
-    order_revenue_yen = calculate_order_revenue_yen(
-        exchange_rate,
-        actual_sale_price_usd,
-        actual_buyer_shipping_usd,
-        actual_ebay_fee_usd,
-        actual_ad_fee_usd,
-        actual_fixed_fee_usd,
-        actual_usd_jpy_rate,
-    )
+    order_revenue_yen = actual_costs.get("actual_order_revenue_yen")
+    if order_revenue_yen is None:
+        order_revenue_yen = calculate_order_revenue_yen(
+            exchange_rate,
+            actual_sale_price_usd,
+            actual_buyer_shipping_usd,
+            actual_ebay_fee_usd,
+            actual_ad_fee_usd,
+            actual_fixed_fee_usd,
+            actual_usd_jpy_rate,
+        )
     gross_sales_yen = (
         actual_sale_price_usd + actual_buyer_shipping_usd
     ) * exchange_rate
@@ -1132,17 +1147,19 @@ def recalculate_sold_actual_profits(exchange_rate: float) -> None:
                 actual["actual_buyer_shipping_usd"],
                 actual["actual_shipping_yen"],
             )
-            order_revenue = None
+            order_revenue = optional_value(row, "actual_order_revenue_yen")
             if not is_simple_profit_platform(row):
-                order_revenue = calculate_order_revenue_yen(
-                    float(actual_details["actual_exchange_rate"]),
-                    actual["actual_sale_price_usd"],
-                    actual["actual_buyer_shipping_usd"],
-                    actual["actual_ebay_fee_usd"],
-                    actual["actual_ad_fee_usd"],
-                    actual["actual_fixed_fee_usd"],
-                    fee_exchange_rate,
-                )
+                if order_revenue is None:
+                    order_revenue = calculate_order_revenue_yen(
+                        float(actual_details["actual_exchange_rate"]),
+                        actual["actual_sale_price_usd"],
+                        actual["actual_buyer_shipping_usd"],
+                        actual["actual_ebay_fee_usd"],
+                        actual["actual_ad_fee_usd"],
+                        actual["actual_fixed_fee_usd"],
+                        fee_exchange_rate,
+                    )
+                actual_details["actual_order_revenue_yen"] = order_revenue
             actual_profit = calculate_actual_profit(
                 row,
                 actual_details["actual_exchange_rate"],
@@ -2110,17 +2127,19 @@ def update_listing_details(listing_id: int, updates: dict[str, object]) -> None:
                     row["purchase_price_yen"]
                 )
             fee_exchange_rate = actual_usd_jpy_rate(latest)
-            order_revenue = None
+            order_revenue = optional_value(latest, "actual_order_revenue_yen")
             if not is_simple_profit_platform(latest):
-                order_revenue = calculate_order_revenue_yen(
-                    float(actual_details["actual_exchange_rate"]),
-                    actual["actual_sale_price_usd"],
-                    actual["actual_buyer_shipping_usd"],
-                    actual["actual_ebay_fee_usd"],
-                    actual["actual_ad_fee_usd"],
-                    actual["actual_fixed_fee_usd"],
-                    fee_exchange_rate,
-                )
+                if order_revenue is None:
+                    order_revenue = calculate_order_revenue_yen(
+                        float(actual_details["actual_exchange_rate"]),
+                        actual["actual_sale_price_usd"],
+                        actual["actual_buyer_shipping_usd"],
+                        actual["actual_ebay_fee_usd"],
+                        actual["actual_ad_fee_usd"],
+                        actual["actual_fixed_fee_usd"],
+                        fee_exchange_rate,
+                    )
+                actual_details["actual_order_revenue_yen"] = order_revenue
             actual_profit = calculate_actual_profit(
                 latest,
                 float(actual_details["actual_exchange_rate"]),
@@ -4566,7 +4585,7 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
                 format="%.2f",
                 key=f"actual_fixed_fee_usd_{selected_id}_{actual_defaults_suffix}",
             )
-            actual_order_revenue_yen = calculate_order_revenue_yen(
+            calculated_order_revenue_yen = calculate_order_revenue_yen(
                 actual_exchange_rate,
                 actual_sale_price_usd,
                 actual_buyer_shipping_usd,
@@ -4575,9 +4594,72 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
                 actual_fixed_fee_usd,
                 actual_usd_jpy_rate_value,
             )
-            fee_col4.metric(
+            order_revenue_widget_key = (
+                f"actual_order_revenue_yen_input_{selected_id}"
+            )
+            order_revenue_manual_key = (
+                f"{order_revenue_widget_key}_manual"
+            )
+            order_revenue_source_key = (
+                f"{order_revenue_widget_key}_source"
+            )
+            order_revenue_source = (
+                round(actual_exchange_rate, 6),
+                round(actual_sale_price_usd, 4),
+                round(actual_buyer_shipping_usd, 4),
+                round(actual_ebay_fee_usd, 4),
+                round(actual_ad_fee_usd, 4),
+                round(actual_fixed_fee_usd, 4),
+                round(actual_usd_jpy_rate_value, 6),
+            )
+            stored_order_revenue = optional_value(
+                draft_selected,
+                "actual_order_revenue_yen",
+            )
+            order_revenue_widget_exists = (
+                order_revenue_widget_key in st.session_state
+            )
+            if not order_revenue_widget_exists:
+                st.session_state[order_revenue_manual_key] = (
+                    stored_order_revenue is not None
+                )
+            elif (
+                st.session_state.get(order_revenue_source_key)
+                != order_revenue_source
+                and not st.session_state.get(order_revenue_manual_key, False)
+            ):
+                st.session_state[order_revenue_widget_key] = float(
+                    calculated_order_revenue_yen
+                )
+            st.session_state[order_revenue_source_key] = order_revenue_source
+
+            order_revenue_input_options: dict[str, object] = {}
+            if not order_revenue_widget_exists:
+                order_revenue_input_options["value"] = float(
+                    stored_order_revenue
+                    if stored_order_revenue is not None
+                    else calculated_order_revenue_yen
+                )
+            actual_order_revenue_yen = fee_col4.number_input(
                 TEXT["actual_order_revenue_yen"],
-                yen(actual_order_revenue_yen),
+                step=100.0,
+                format="%.0f",
+                key=order_revenue_widget_key,
+                on_change=mark_order_revenue_as_manual,
+                args=(order_revenue_manual_key,),
+                **order_revenue_input_options,
+            )
+            actual_order_revenue_usd = calculate_order_revenue_usd(
+                actual_order_revenue_yen,
+                actual_usd_jpy_rate_value,
+            )
+            fee_col4.caption(
+                "注文の収益（USD）: "
+                + (
+                    "算出不可"
+                    if actual_order_revenue_usd is None
+                    else f"${actual_order_revenue_usd:,.2f}"
+                )
             )
 
         shipping_col1, shipping_col2, shipping_col3, shipping_col4 = st.columns(4)
@@ -4876,6 +4958,7 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
             f"{value(draft_selected, 'fixed_fee_usd'):.2f}"
             f"_{actual_exchange_rate:.4f}_{actual_purchase_price_yen:.0f}"
             f"_{actual_usd_jpy_rate_value:.4f}"
+            f"_{float(actual_order_revenue_yen or 0):.0f}"
             f"_{actual_overseas_fee_yen:.0f}_{actual_copy_cost_yen:.0f}"
             f"_{actual_packaging_yen:.0f}_{actual_other_cost_yen:.0f}"
             f"_{float(actual_sales_fee_yen or 0):.0f}"
