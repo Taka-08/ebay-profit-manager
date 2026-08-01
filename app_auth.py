@@ -233,8 +233,8 @@ def _read_browser_session() -> str:
         return cookie_token
     value = streamlit_js_eval(
         js_expressions=(
-            f"window.parent.sessionStorage.getItem("
-            f"{json.dumps(BROWSER_STORAGE_KEY)})"
+            f"(window.parent.sessionStorage.getItem("
+            f"{json.dumps(BROWSER_STORAGE_KEY)}) || '')"
         ),
         key="ebay_auth_session_read",
         default=BROWSER_SESSION_PENDING,
