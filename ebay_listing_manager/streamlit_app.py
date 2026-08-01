@@ -3250,6 +3250,71 @@ def inject_responsive_css() -> None:
         .mobile-listing-cards {
             display: none;
         }
+        @media (min-width: 769px) {
+            .st-key-actual-entry-row-1 div[data-testid="stHorizontalBlock"],
+            .st-key-actual-entry-row-2 div[data-testid="stHorizontalBlock"] {
+                display: grid !important;
+                align-items: stretch !important;
+                gap: 0.75rem !important;
+                width: 100% !important;
+            }
+            .st-key-actual-entry-row-1 div[data-testid="stHorizontalBlock"] {
+                grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+            }
+            .st-key-actual-entry-row-2 div[data-testid="stHorizontalBlock"] {
+                grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+            }
+            .st-key-actual-entry-row-1 div[data-testid="stColumn"],
+            .st-key-actual-entry-row-2 div[data-testid="stColumn"] {
+                width: 100% !important;
+                min-width: 0 !important;
+                flex: none !important;
+            }
+            .st-key-actual-entry-row-1 [data-testid="stWidgetLabel"],
+            .st-key-actual-entry-row-2 [data-testid="stWidgetLabel"] {
+                display: flex !important;
+                align-items: flex-end !important;
+                justify-content: flex-start !important;
+                width: 100% !important;
+                height: 3.1rem !important;
+                min-height: 3.1rem !important;
+                margin-bottom: 0.2rem !important;
+                text-align: left !important;
+            }
+            .st-key-actual-entry-row-1 [data-testid="stWidgetLabel"] p,
+            .st-key-actual-entry-row-2 [data-testid="stWidgetLabel"] p {
+                width: 100% !important;
+                margin: 0 !important;
+                font-size: 0.76rem !important;
+                line-height: 1.15 !important;
+                text-align: left !important;
+                white-space: normal !important;
+                overflow-wrap: anywhere !important;
+            }
+            .st-key-actual-entry-row-1 div[data-testid="stColumn"]:nth-child(3)
+                [data-testid="stWidgetLabel"] p,
+            .st-key-actual-entry-row-1 div[data-testid="stColumn"]:nth-child(5)
+                [data-testid="stWidgetLabel"] p,
+            .st-key-actual-entry-row-2 div[data-testid="stColumn"]:nth-child(2)
+                [data-testid="stWidgetLabel"] p {
+                font-size: 0.64rem !important;
+                line-height: 1.1 !important;
+            }
+            .st-key-actual-entry-row-1 div[data-testid="stNumberInput"],
+            .st-key-actual-entry-row-1 div[data-testid="stDateInput"],
+            .st-key-actual-entry-row-2 div[data-testid="stNumberInput"] {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+            }
+            .st-key-actual-entry-row-1 div[data-baseweb="input"],
+            .st-key-actual-entry-row-2 div[data-baseweb="input"] {
+                width: 100% !important;
+                min-height: 2.5rem !important;
+                height: 2.5rem !important;
+                box-sizing: border-box !important;
+            }
+        }
         @media (max-width: 768px) {
             html,
             body,
@@ -4514,7 +4579,11 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
             actual_ad_fee_usd = 0.0
             actual_fixed_fee_usd = 0.0
         else:
-            col1, col2, col3, col4, col5 = st.columns(5)
+            actual_entry_row_1 = st.container(key="actual-entry-row-1")
+            col1, col2, col3, col4, col5 = actual_entry_row_1.columns(
+                5,
+                gap="small",
+            )
             sold_date = col1.date_input(
                 TEXT["sold_date"],
                 value=date.fromisoformat(str(sold_date_value)),
@@ -4560,7 +4629,11 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
                 key=f"actual_usd_jpy_rate_{selected_id}",
             )
 
-            fee_col1, fee_col2, fee_col3, fee_col4 = st.columns(4)
+            actual_entry_row_2 = st.container(key="actual-entry-row-2")
+            fee_col1, fee_col2, fee_col3, fee_col4 = actual_entry_row_2.columns(
+                4,
+                gap="small",
+            )
             actual_ebay_fee_usd = fee_col1.number_input(
                 TEXT["actual_ebay_fee_usd"],
                 min_value=0.0,
