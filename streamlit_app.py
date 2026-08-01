@@ -24,6 +24,17 @@ from app_paths import (
     resolve_registration_event_path,
     resolve_registration_log_path,
 )
+from currency_config import (
+    DEFAULT_CURRENCY,
+    DEFAULT_JPY_RATES,
+    SUPPORTED_CURRENCIES,
+    YAHOO_FINANCE_SYMBOLS,
+    currency_amount,
+    currency_name,
+    currency_option_label,
+    currency_symbol,
+    normalize_currency,
+)
 from platform_config import (
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -36,9 +47,9 @@ from platform_config import (
 )
 
 
-PRIMARY_EXCHANGE_RATE_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart/JPY=X"
+PRIMARY_EXCHANGE_RATE_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 PRIMARY_EXCHANGE_RATE_API_NAME = "Yahoo Finance market data"
-FALLBACK_EXCHANGE_RATE_API_URL = "https://open.er-api.com/v6/latest/USD"
+FALLBACK_EXCHANGE_RATE_API_URL = "https://open.er-api.com/v6/latest/{currency}"
 FALLBACK_EXCHANGE_RATE_API_NAME = "ExchangeRate-API open.er-api.com"
 EXCHANGE_RATE_MAX_CHANGE_PERCENT = 5.0
 EXCHANGE_RATE_MAX_AGE_HOURS = 96.0
@@ -88,6 +99,8 @@ class ProductInputs:
     exchange_rate: float
     postal_code: str = ""
     memo: str = ""
+    currency_code: str = DEFAULT_CURRENCY
+    usd_jpy_rate: float = DEFAULT_JPY_RATES["USD"]
 
 
 @dataclass(frozen=True)
@@ -189,18 +202,36 @@ def grams(value: float | int | None) -> str:
     return f"{value:,.0f}g"
 
 
-def read_shared_exchange_rate_data() -> dict[str, Any] | None:
+def read_exchange_rate_store() -> dict[str, Any] | None:
     try:
         return json.loads(SHARED_EXCHANGE_RATE_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
 
 
-def read_shared_exchange_rate() -> float | None:
-    data = read_shared_exchange_rate_data()
+def read_shared_exchange_rate_data(
+    currency_code: str = DEFAULT_CURRENCY,
+) -> dict[str, Any] | None:
+    currency = normalize_currency(currency_code)
+    store = read_exchange_rate_store()
+    if not store:
+        return None
+    rates = store.get("rates")
+    if isinstance(rates, dict) and isinstance(rates.get(currency), dict):
+        return dict(rates[currency])
+    if currency == "USD" and isinstance(store.get("usd_jpy"), (int, float)):
+        return store
+    return None
+
+
+def read_shared_exchange_rate(
+    currency_code: str = DEFAULT_CURRENCY,
+) -> float | None:
+    currency = normalize_currency(currency_code)
+    data = read_shared_exchange_rate_data(currency)
     if not data:
         return None
-    rate = data.get("usd_jpy")
+    rate = data.get("rate", data.get("usd_jpy"))
     if not isinstance(rate, (int, float)) or rate <= 0:
         return None
     return float(rate)
@@ -209,6 +240,7 @@ def read_shared_exchange_rate() -> float | None:
 def save_shared_exchange_rate(
     rate: float,
     *,
+    currency_code: str = DEFAULT_CURRENCY,
     source: str,
     raw_jpy: float | None = None,
     api_updated_at: str | None = None,
@@ -218,10 +250,12 @@ def save_shared_exchange_rate(
     fallback_used: bool = False,
 ) -> None:
     """Save the shared rate while preserving API and manual-rate metadata."""
+    currency = normalize_currency(currency_code)
     LISTING_MANAGER_DIR.mkdir(exist_ok=True)
     acquired_at = fetched_at or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-    data = {
-        "usd_jpy": float(rate),
+    record = {
+        "currency_code": currency,
+        "rate": float(rate),
         "source": source,
         "updated_at": acquired_at,
         "fetched_at": acquired_at,
@@ -231,8 +265,16 @@ def save_shared_exchange_rate(
         "mode": mode,
         "api_rate": api_rate if api_rate is not None else raw_jpy,
         "fallback_used": fallback_used,
-        "pair": "USD/JPY",
+        "pair": f"{currency}/JPY",
     }
+    data = read_exchange_rate_store() or {}
+    rates = dict(data.get("rates") or {})
+    rates[currency] = record
+    data["schema_version"] = 2
+    data["rates"] = rates
+    if currency == "USD":
+        data.update(record)
+        data["usd_jpy"] = float(rate)
     SHARED_EXCHANGE_RATE_PATH.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -265,21 +307,29 @@ def format_api_timestamp(timestamp: int | float | None) -> str | None:
     )
 
 
-def fetch_primary_usd_jpy_rate() -> dict[str, Any]:
-    payload = exchange_rate_request_json(PRIMARY_EXCHANGE_RATE_API_URL)
+def fetch_primary_exchange_rate(currency_code: str) -> dict[str, Any]:
+    currency = normalize_currency(currency_code)
+    symbol = YAHOO_FINANCE_SYMBOLS[currency]
+    payload = exchange_rate_request_json(
+        PRIMARY_EXCHANGE_RATE_API_URL.format(symbol=symbol)
+    )
     chart = payload.get("chart") or {}
     results = chart.get("result") or []
     if not results:
         raise ValueError(
-            f"メインAPIにUSD/JPYデータがありません: {chart.get('error') or '詳細不明'}"
+            f"メインAPIに{currency}/JPYデータがありません: "
+            f"{chart.get('error') or '詳細不明'}"
         )
     meta = results[0].get("meta") or {}
-    if meta.get("symbol") != "JPY=X" or meta.get("currency") != "JPY":
-        raise ValueError("メインAPIからUSD/JPY以外の通貨ペアが返されました。")
+    if meta.get("symbol") != symbol or meta.get("currency") != "JPY":
+        raise ValueError(
+            f"メインAPIから{currency}/JPY以外の通貨ペアが返されました。"
+        )
     rate = meta.get("regularMarketPrice")
     if not isinstance(rate, (int, float)) or rate <= 0:
-        raise ValueError("メインAPIに有効なUSD/JPYレートがありません。")
+        raise ValueError(f"メインAPIに有効な{currency}/JPYレートがありません。")
     return {
+        "currency_code": currency,
         "rate": float(rate),
         "raw_jpy": float(rate),
         "source": PRIMARY_EXCHANGE_RATE_API_NAME,
@@ -288,15 +338,21 @@ def fetch_primary_usd_jpy_rate() -> dict[str, Any]:
     }
 
 
-def fetch_fallback_usd_jpy_rate() -> dict[str, Any]:
-    payload = exchange_rate_request_json(FALLBACK_EXCHANGE_RATE_API_URL)
-    if payload.get("base_code") != "USD":
-        raise ValueError("予備APIからUSD基準以外の通貨データが返されました。")
+def fetch_fallback_exchange_rate(currency_code: str) -> dict[str, Any]:
+    currency = normalize_currency(currency_code)
+    payload = exchange_rate_request_json(
+        FALLBACK_EXCHANGE_RATE_API_URL.format(currency=currency)
+    )
+    if payload.get("base_code") != currency:
+        raise ValueError(
+            f"予備APIから{currency}基準以外の通貨データが返されました。"
+        )
     rates = payload.get("rates") or {}
     rate = rates.get("JPY")
     if not isinstance(rate, (int, float)) or rate <= 0:
         raise ValueError("予備APIに有効なJPYレートがありません。")
     return {
+        "currency_code": currency,
         "rate": float(rate),
         "raw_jpy": float(rate),
         "source": FALLBACK_EXCHANGE_RATE_API_NAME,
@@ -348,30 +404,53 @@ def validate_exchange_rate_result(
             )
 
 
-def fetch_usd_jpy_rate() -> tuple[dict[str, Any], str | None]:
+def fetch_exchange_rate(
+    currency_code: str,
+) -> tuple[dict[str, Any], str | None]:
+    currency = normalize_currency(currency_code)
     primary_error: str | None = None
     try:
-        return fetch_primary_usd_jpy_rate(), None
+        return fetch_primary_exchange_rate(currency), None
     except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, OSError) as exc:
         primary_error = str(exc)
     try:
-        return fetch_fallback_usd_jpy_rate(), primary_error
+        return fetch_fallback_exchange_rate(currency), primary_error
     except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, OSError) as exc:
         raise RuntimeError(
             f"メインAPI: {primary_error or '取得失敗'} / 予備API: {exc}"
         ) from exc
 
 
-def update_exchange_rate_from_api(*, trigger: str = "button") -> None:
-    previous_data = read_shared_exchange_rate_data() or {}
-    before = read_shared_exchange_rate()
+def fetch_primary_usd_jpy_rate() -> dict[str, Any]:
+    return fetch_primary_exchange_rate("USD")
+
+
+def fetch_fallback_usd_jpy_rate() -> dict[str, Any]:
+    return fetch_fallback_exchange_rate("USD")
+
+
+def fetch_usd_jpy_rate() -> tuple[dict[str, Any], str | None]:
+    return fetch_exchange_rate("USD")
+
+
+def update_exchange_rate_from_api(
+    *,
+    trigger: str = "button",
+    currency_code: str | None = None,
+) -> None:
+    currency = normalize_currency(
+        currency_code or st.session_state.get("exchange_currency")
+    )
+    previous_data = read_shared_exchange_rate_data(currency) or {}
+    before = read_shared_exchange_rate(currency)
     try:
-        result, primary_error = fetch_usd_jpy_rate()
+        result, primary_error = fetch_exchange_rate(currency)
         validate_exchange_rate_result(result, before)
         rate = float(result["rate"])
         fetched_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
         save_shared_exchange_rate(
             rate,
+            currency_code=currency,
             source=str(result["source"]),
             raw_jpy=float(result["raw_jpy"]),
             api_updated_at=result.get("api_updated_at"),
@@ -394,6 +473,7 @@ def update_exchange_rate_from_api(*, trigger: str = "button") -> None:
             "fallback_used": bool(result.get("fallback_used")),
             "primary_error": primary_error,
             "trigger": trigger,
+            "currency_code": currency,
         }
     except (
         urllib.error.URLError,
@@ -403,7 +483,9 @@ def update_exchange_rate_from_api(*, trigger: str = "button") -> None:
         OSError,
         RuntimeError,
     ) as exc:
-        fallback = before or float(st.session_state.get("exchange_rate", 150.0))
+        fallback = before or float(
+            st.session_state.get("exchange_rate", DEFAULT_JPY_RATES[currency])
+        )
         st.session_state.exchange_rate = fallback
         st.session_state.exchange_rate_input = fallback
         st.session_state.exchange_rate_message = {
@@ -412,30 +494,40 @@ def update_exchange_rate_from_api(*, trigger: str = "button") -> None:
             "after": fallback,
             "error": str(exc),
             "trigger": trigger,
+            "currency_code": currency,
         }
 
 
-def load_exchange_rate() -> None:
-    if "exchange_rate" not in st.session_state:
-        saved_data = read_shared_exchange_rate_data() or {}
-        saved = read_shared_exchange_rate()
-        st.session_state.exchange_rate = saved if saved else 150.0
+def load_exchange_rate(currency_code: str = DEFAULT_CURRENCY) -> None:
+    currency = normalize_currency(currency_code)
+    if st.session_state.get("exchange_rate_loaded_currency") != currency:
+        saved_data = read_shared_exchange_rate_data(currency) or {}
+        saved = read_shared_exchange_rate(currency)
+        st.session_state.exchange_rate = (
+            saved if saved else DEFAULT_JPY_RATES[currency]
+        )
         st.session_state.exchange_rate_input = st.session_state.exchange_rate
         st.session_state.exchange_rate_manual = saved_data.get("mode") == "manual"
-    if not st.session_state.get("exchange_rate_startup_checked"):
-        st.session_state.exchange_rate_startup_checked = True
-        update_exchange_rate_from_api(trigger="startup")
+        st.session_state.exchange_rate_loaded_currency = currency
+    startup_key = f"exchange_rate_startup_checked_{currency}"
+    if not st.session_state.get(startup_key):
+        st.session_state[startup_key] = True
+        update_exchange_rate_from_api(trigger="startup", currency_code=currency)
 
 
-def apply_manual_exchange_rate() -> None:
+def apply_manual_exchange_rate(currency_code: str | None = None) -> None:
+    currency = normalize_currency(
+        currency_code or st.session_state.get("exchange_currency")
+    )
     rate = float(st.session_state.get("exchange_rate_input", 0))
     if rate <= 0:
         return
-    previous = read_shared_exchange_rate_data() or {}
+    previous = read_shared_exchange_rate_data(currency) or {}
     st.session_state.exchange_rate = rate
     st.session_state.exchange_rate_manual = True
     save_shared_exchange_rate(
         rate,
+        currency_code=currency,
         source="手動入力",
         raw_jpy=previous.get("raw_jpy"),
         api_updated_at=previous.get("api_updated_at")
@@ -447,6 +539,7 @@ def apply_manual_exchange_rate() -> None:
     st.session_state.exchange_rate_message = {
         "type": "manual",
         "after": rate,
+        "currency_code": currency,
     }
 
 
@@ -670,6 +763,7 @@ def init_listing_db() -> None:
                 actual_ebay_fee_usd REAL,
                 actual_ad_fee_usd REAL,
                 actual_fixed_fee_usd REAL,
+                actual_fee_schema_version INTEGER NOT NULL DEFAULT 1,
                 effective_ebay_fee_rate REAL,
                 effective_ad_fee_rate REAL,
                 actual_shipping_yen REAL,
@@ -690,6 +784,11 @@ def init_listing_db() -> None:
             row[1] for row in connection.execute("PRAGMA table_info(listings)")
         }
         required_columns = {
+            "currency_code": "TEXT NOT NULL DEFAULT 'USD'",
+            "usd_jpy_rate": "REAL NOT NULL DEFAULT 0",
+            "actual_usd_jpy_rate": "REAL",
+            "actual_order_revenue_yen": "REAL",
+            "actual_fee_schema_version": "INTEGER NOT NULL DEFAULT 1",
             "sku": "TEXT NOT NULL DEFAULT ''",
             "source_url": "TEXT NOT NULL DEFAULT ''",
             "destination_country": "TEXT NOT NULL DEFAULT ''",
@@ -1035,7 +1134,7 @@ def calculate_one_shipping_result(
     ebay_fee_yen = gross_sales_yen * inputs.ebay_fee_rate / 100
     overseas_fee_yen = gross_sales_yen * inputs.overseas_fee_rate / 100
     ad_fee_yen = gross_sales_yen * inputs.ad_rate / 100
-    fixed_fee_yen = inputs.fixed_fee_usd * inputs.exchange_rate
+    fixed_fee_yen = inputs.fixed_fee_usd * inputs.usd_jpy_rate
     profit_yen = (
         gross_sales_yen
         - inputs.purchase_price_yen
@@ -1429,8 +1528,8 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
         ("発送可能", result.status),
         ("発送不可理由", result.reason or "-"),
         ("固定手数料（USD）", f"${inputs.fixed_fee_usd:,.2f}"),
-        ("固定手数料の為替レート", f"{inputs.exchange_rate:.4f}"),
-        ("固定手数料の円換算額", compact_yen(inputs.fixed_fee_usd * inputs.exchange_rate)),
+        ("固定手数料の為替レート", f"USD/JPY {inputs.usd_jpy_rate:.4f}"),
+        ("固定手数料の円換算額", compact_yen(inputs.fixed_fee_usd * inputs.usd_jpy_rate)),
     ]
     st.markdown(
         f"""
@@ -1445,9 +1544,12 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
     if result.zonos_applied:
         with st.expander("Zonos情報", expanded=False):
             zonos_items = [
-                ("商品価格USD", f"${inputs.sale_price_usd:,.2f}"),
+                (
+                    f"商品価格{inputs.currency_code}",
+                    currency_amount(inputs.sale_price_usd, inputs.currency_code),
+                ),
                 ("商品価格円換算", compact_yen(inputs.sale_price_usd * inputs.exchange_rate)),
-                ("為替レート", f"{inputs.exchange_rate:.4f}"),
+                ("為替レート", f"{inputs.currency_code}/JPY {inputs.exchange_rate:.4f}"),
                 ("Zonos手数料基準額", compact_yen(result.zonos_fee_base_yen)),
                 ("適用された手数料率", f"{result.zonos_fee_rate_percent:.2f}%" if result.zonos_fee_rate_percent is not None else "-"),
                 ("関税率", f"{result.zonos_duty_rate_percent:.2f}%" if result.zonos_duty_rate_percent is not None else "-"),
@@ -1752,7 +1854,7 @@ def _register_listing(
     ebay_fee_yen = gross_sales_yen * inputs.ebay_fee_rate / 100
     overseas_fee_yen = gross_sales_yen * inputs.overseas_fee_rate / 100
     ad_fee_yen = gross_sales_yen * inputs.ad_rate / 100
-    fixed_fee_yen = inputs.fixed_fee_usd * inputs.exchange_rate
+    fixed_fee_yen = inputs.fixed_fee_usd * inputs.usd_jpy_rate
     roi = (
         selected_result.profit_yen / inputs.purchase_price_yen * 100
         if inputs.purchase_price_yen > 0 and selected_result.profit_yen is not None
@@ -1760,10 +1862,15 @@ def _register_listing(
     )
     shipping_breakdown = shipping_breakdown_payload(selected_result, now)
     shipping_breakdown["destination_country"] = inputs.destination_country
+    shipping_breakdown["currency_code"] = inputs.currency_code
+    shipping_breakdown["product_exchange_rate"] = inputs.exchange_rate
+    shipping_breakdown["usd_jpy_rate"] = inputs.usd_jpy_rate
 
     data = {
         "product_name": inputs.product_name.strip(),
         "platform": PLATFORM_EBAY,
+        "currency_code": inputs.currency_code,
+        "usd_jpy_rate": inputs.usd_jpy_rate,
         "listing_date": date.today().isoformat(),
         "listing_price_usd": inputs.sale_price_usd,
         "listing_price": inputs.sale_price_usd,
@@ -1865,7 +1972,8 @@ def _register_listing(
                 """
                 SELECT id, product_name, expected_shipping_carrier,
                        expected_shipping_service, planned_shipping_yen,
-                       expected_profit_yen, created_at
+                       expected_profit_yen, currency_code, exchange_rate,
+                       usd_jpy_rate, created_at
                 FROM listings
                 WHERE id = ?
                 """,
@@ -1884,6 +1992,10 @@ def _register_listing(
             raise RuntimeError(
                 f"保存確認時の商品名が一致しません。ID: {listing_id}"
             )
+        if normalize_currency(saved_row["currency_code"]) != inputs.currency_code:
+            raise RuntimeError(
+                f"保存確認時の販売通貨が一致しません。ID: {listing_id}"
+            )
 
         event_details = {
             "listing_id": listing_id,
@@ -1893,6 +2005,10 @@ def _register_listing(
             "carrier": selected_result.carrier,
             "service": selected_result.service,
             "sale_price_usd": inputs.sale_price_usd,
+            "sale_price_foreign": inputs.sale_price_usd,
+            "currency_code": inputs.currency_code,
+            "exchange_rate": inputs.exchange_rate,
+            "usd_jpy_rate": inputs.usd_jpy_rate,
             "planned_shipping_yen": selected_result.total_shipping_yen,
             "planned_profit_yen": selected_result.profit_yen,
         }
@@ -2102,6 +2218,8 @@ def register_simple_listing(
     data = {
         "product_name": inputs.product_name.strip(),
         "platform": inputs.platform,
+        "currency_code": "JPY",
+        "usd_jpy_rate": 0.0,
         "listing_date": date.today().isoformat(),
         "listing_price_usd": inputs.sale_price_yen,
         "listing_price": inputs.sale_price_yen,
@@ -2965,27 +3083,37 @@ def render_header() -> None:
     st.caption("販売プラットフォームに合わせて、必要な費用と利益を計算します。")
 
 
-def render_exchange_rate() -> float:
-    """Render the restored multi-source exchange-rate controls."""
-    load_exchange_rate()
+def render_exchange_rate() -> tuple[str, float, float]:
+    """Render the selected currency rate and return product and USD rates."""
     st.markdown("### 為替レート")
-    rate_col, button_col, time_col = st.columns([1.1, 0.9, 1.4])
+    currency_col, rate_col, button_col, time_col = st.columns([0.9, 1.1, 0.9, 1.4])
+    currency = currency_col.selectbox(
+        "販売通貨",
+        SUPPORTED_CURRENCIES,
+        index=SUPPORTED_CURRENCIES.index(
+            normalize_currency(st.session_state.get("exchange_currency"))
+        ),
+        format_func=currency_option_label,
+        key="exchange_currency",
+    )
+    load_exchange_rate(currency)
     rate_col.number_input(
-        "現在のUSD/JPYレート",
+        f"現在の{currency}/JPYレート",
         min_value=0.01,
         step=0.0001,
         format="%.4f",
         key="exchange_rate_input",
         on_change=apply_manual_exchange_rate,
+        args=(currency,),
     )
     button_col.button(
         "最新レートに更新",
         use_container_width=True,
         on_click=update_exchange_rate_from_api,
-        kwargs={"trigger": "button"},
+        kwargs={"trigger": "button", "currency_code": currency},
     )
 
-    saved_data = read_shared_exchange_rate_data() or {}
+    saved_data = read_shared_exchange_rate_data(currency) or {}
     time_col.caption(f"取得元: {saved_data.get('source', '保存済みレート')}")
     time_col.caption(
         "API更新日時: "
@@ -3001,6 +3129,8 @@ def render_exchange_rate() -> float:
         st.info(f"手動設定中です。最後に取得したAPI自動取得値: {api_text}")
 
     message = st.session_state.get("exchange_rate_message")
+    if message and message.get("currency_code") != currency:
+        message = None
     if message:
         if message.get("type") == "error":
             st.error(
@@ -3009,7 +3139,7 @@ def render_exchange_rate() -> float:
             )
         elif message.get("type") == "manual":
             st.info(
-                f"為替レートを手動で{float(message.get('after')):.4f}円に設定しました。"
+                f"{currency}/JPYを手動で{float(message.get('after')):.4f}円に設定しました。"
             )
         else:
             before = message.get("before")
@@ -3028,11 +3158,14 @@ def render_exchange_rate() -> float:
                 )
             elif before is not None and before != after:
                 st.success(
-                    f"為替レートを{float(before):.4f}円から"
+                    f"{currency}/JPYを{float(before):.4f}円から"
                     f"{float(after):.4f}円へ更新しました。"
                 )
             else:
-                st.success(f"最新の為替レートを取得しました: {float(after):.4f}円")
+                st.success(
+                    f"最新の{currency}/JPYレートを取得しました: "
+                    f"{float(after):.4f}円"
+                )
 
     with st.expander("為替レートの詳細情報", expanded=False):
         st.json(saved_data)
@@ -3041,10 +3174,20 @@ def render_exchange_rate() -> float:
             f"またはAPI更新から{EXCHANGE_RATE_MAX_AGE_HOURS:.0f}時間超の場合は"
             "自動適用しません。"
         )
-    return float(st.session_state.exchange_rate)
+    selected_rate = float(st.session_state.exchange_rate)
+    usd_jpy_rate = (
+        selected_rate
+        if currency == "USD"
+        else read_shared_exchange_rate("USD") or DEFAULT_JPY_RATES["USD"]
+    )
+    return currency, selected_rate, float(usd_jpy_rate)
 
 
-def render_inputs(exchange_rate: float) -> ProductInputs:
+def render_inputs(
+    exchange_rate: float,
+    currency_code: str,
+    usd_jpy_rate: float,
+) -> ProductInputs:
     st.markdown("### 商品情報・販売条件")
     if st.button("手数料を初期値に戻す", help="eBay手数料率と広告率だけを初期値へ戻します。"):
         st.session_state.input_ebay_fee_rate = DEFAULT_EBAY_FEE_RATE
@@ -3061,7 +3204,7 @@ def render_inputs(exchange_rate: float) -> ProductInputs:
 
     price_col1, price_col2, price_col3 = st.columns(3)
     sale_price_usd = price_col1.number_input(
-        "販売価格（USD）",
+        f"販売価格（{currency_code} / {currency_symbol(currency_code)}）",
         min_value=0.0,
         value=29.99,
         step=1.0,
@@ -3144,6 +3287,8 @@ def render_inputs(exchange_rate: float) -> ProductInputs:
         exchange_rate=exchange_rate,
         postal_code=postal_code,
         memo=memo,
+        currency_code=currency_code,
+        usd_jpy_rate=usd_jpy_rate,
     )
 
 
@@ -3623,8 +3768,8 @@ def main() -> None:
         render_simple_profit_calculator(platform)
         return
 
-    exchange_rate = render_exchange_rate()
-    inputs = render_inputs(exchange_rate)
+    currency_code, exchange_rate, usd_jpy_rate = render_exchange_rate()
+    inputs = render_inputs(exchange_rate, currency_code, usd_jpy_rate)
     results = calculate_shipping_results(inputs)
     st.divider()
     render_summary(results)

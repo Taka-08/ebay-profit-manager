@@ -36,7 +36,10 @@ class ListingRegistrationIntegrationTest(unittest.TestCase):
     ) -> AppTest:
         self.element_with_label(app.text_input, "商品名").set_value(product_name)
         self.element_with_label(app.text_input, "郵便番号").set_value("10001")
-        self.element_with_label(app.number_input, "販売価格（USD）").set_value(80.0)
+        self.element_with_label(
+            app.number_input,
+            "販売価格（USD / $）",
+        ).set_value(80.0)
         self.element_with_label(app.number_input, "仕入れ価格（円）").set_value(4000.0)
         self.element_with_label(app.number_input, "実重量（g）").set_value(500.0)
         if include_size:
