@@ -29,6 +29,7 @@ BROWSER_SESSION_DELETE_PENDING_KEY = "_ebay_tool_browser_delete_pending"
 BROWSER_SESSION_DISABLED_KEY = "_ebay_tool_browser_session_disabled"
 BROWSER_SESSION_COOKIE_SYNCED_KEY = "_ebay_tool_browser_cookie_synced"
 BROWSER_STORAGE_KEY = "ebay_tool_authenticated_session"
+BROWSER_SESSION_PENDING = "__ebay_auth_browser_check_pending__"
 PBKDF2_ALGORITHM = "pbkdf2_sha256"
 INSECURE_PLACEHOLDERS = {
     "change-this-password",
@@ -236,7 +237,7 @@ def _read_browser_session() -> str:
             f"{json.dumps(BROWSER_STORAGE_KEY)})"
         ),
         key="ebay_auth_session_read",
-        default="",
+        default=BROWSER_SESSION_PENDING,
     )
     result = "" if value is None else str(value)
     return result
@@ -312,11 +313,20 @@ def require_app_password() -> None:
         expected_fingerprint,
     )
     restored_browser_session = False
+    browser_session = ""
     if (
         not session_is_authenticated
         and not logout_pending
         and not st.session_state.get(BROWSER_SESSION_DISABLED_KEY, False)
-        and _session_token_is_valid(_read_browser_session())
+    ):
+        browser_session = _read_browser_session()
+        if browser_session == BROWSER_SESSION_PENDING:
+            st.stop()
+    if (
+        not session_is_authenticated
+        and not logout_pending
+        and not st.session_state.get(BROWSER_SESSION_DISABLED_KEY, False)
+        and _session_token_is_valid(browser_session)
     ):
         st.session_state[SESSION_KEY] = expected_fingerprint
         session_is_authenticated = True

@@ -104,7 +104,7 @@ class CloudDeploymentTest(unittest.TestCase):
                 "TURSO_AUTH_TOKEN": "",
             },
             clear=False,
-        ):
+        ), patch.object(app_auth, "_read_browser_session", return_value=""):
             manager = AppTest.from_file(str(MANAGER_APP)).run(timeout=20)
 
         self.assertFalse(manager.exception)
@@ -132,7 +132,7 @@ class CloudDeploymentTest(unittest.TestCase):
                 "TURSO_AUTH_TOKEN": "",
             },
             clear=False,
-        ):
+        ), patch.object(app_auth, "_read_browser_session", return_value=""):
             manager = AppTest.from_file(str(MANAGER_APP)).run(timeout=20)
             username = next(
                 item for item in manager.text_input if item.label == "ユーザー名"
@@ -183,6 +183,36 @@ class CloudDeploymentTest(unittest.TestCase):
             any("ダッシュボード" in item.value for item in manager.subheader)
         )
         scroll_to_top.assert_called_once_with()
+
+    def test_pending_browser_restore_does_not_render_login_form(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="ebay-auth-pending-test-"))
+        with patch.dict(
+            os.environ,
+            {
+                "EBAY_TOOL_WORKSPACE": str(workspace),
+                "EBAY_REQUIRE_AUTH": "true",
+                "EBAY_TOOL_USERNAME": "cloud-user",
+                "EBAY_TOOL_PASSWORD": "long-test-password",
+                "EBAY_TOOL_PASSWORD_HASH": "",
+                "TURSO_DATABASE_URL": "",
+                "TURSO_AUTH_TOKEN": "",
+            },
+            clear=False,
+        ), patch.object(
+            app_auth,
+            "_read_browser_session",
+            return_value=app_auth.BROWSER_SESSION_PENDING,
+        ):
+            manager = AppTest.from_file(str(MANAGER_APP)).run(timeout=20)
+
+        self.assertFalse(manager.exception)
+        self.assertFalse(any(item.label == "ログイン" for item in manager.button))
+        self.assertFalse(
+            any("ダッシュボード" in item.value for item in manager.subheader)
+        )
+        self.assertFalse(
+            (workspace / "ebay_listing_manager" / "ebay_listings.sqlite3").exists()
+        )
 
     def test_local_database_remains_sqlite_compatible(self) -> None:
         path = Path(tempfile.mkdtemp(prefix="ebay-db-test-")) / "listings.sqlite3"
