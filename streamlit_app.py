@@ -62,12 +62,18 @@ ZONOS_CONFIG_PATH = Path(__file__).with_name("zonos_prepay_config.json")
 
 JAPAN_POST_CARRIER = "\u65e5\u672c\u90f5\u4fbf"
 UNITED_STATES_COUNTRY = "\u30a2\u30e1\u30ea\u30ab"
-DEFAULT_EBAY_FEE_RATE = 15.00
-DEFAULT_AD_RATE = 2.10
+DEFAULT_SALE_PRICE_FOREIGN = 0.0
+DEFAULT_EBAY_FEE_RATE = 17.50
+DEFAULT_AD_RATE = 0.0
 DEFAULT_OVERSEAS_FEE_RATE = 2.00
 DEFAULT_FIXED_FEE_USD = 0.30
 DEFAULT_COPY_COST_YEN = 20.0
 REGISTRATION_DEDUP_WINDOW_SECONDS = 30.0
+HIDDEN_SHIPPING_SERVICES = frozenset(
+    {
+        (JAPAN_POST_CARRIER, "\u5c0f\u5f62\u5305\u88c5\u7269"),
+    }
+)
 
 STATUS_ACTIVE = "出品中"
 DEFAULT_COUNTRIES = ("アメリカ", "カナダ", "イギリス", "オーストラリア", "ドイツ", "フランス")
@@ -1245,6 +1251,11 @@ def calculate_shipping_results(inputs: ProductInputs) -> list[ShippingResult]:
     results = [
         calculate_one_shipping_result(service, inputs)
         for service in rate_book.get("services", [])
+        if (
+            str(service.get("carrier") or ""),
+            str(service.get("service") or ""),
+        )
+        not in HIDDEN_SHIPPING_SERVICES
     ]
     available = [result for result in results if result.shippable and result.profit_yen is not None]
     if not available:
@@ -3204,7 +3215,7 @@ def render_inputs(
     sale_price_usd = price_col1.number_input(
         f"販売価格（{currency_code} / {currency_symbol(currency_code)}）",
         min_value=0.0,
-        value=29.99,
+        value=DEFAULT_SALE_PRICE_FOREIGN,
         step=1.0,
         format="%.2f",
     )

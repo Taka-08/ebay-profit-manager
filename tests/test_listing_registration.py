@@ -235,7 +235,7 @@ class ListingRegistrationIntegrationTest(unittest.TestCase):
         )
 
         targets = (
-            ("日本郵便", "小形包装物"),
+            ("日本郵便", "EMS"),
             ("SpeedPAK / CPaSS", "SpeedPAK Economy"),
             ("FedEx", "International Connect Plus (FICP)"),
             ("DHL", "Express Worldwide"),
