@@ -8,8 +8,7 @@
   compared.
 - The Streamlit database adapter can read the Turso database.
 - Turso write access was tested inside a transaction and rolled back.
-- Cloud authentication uses a PBKDF2 password hash.
-- Real database credentials, login credentials, SQLite files, logs, and backups
+- Real database credentials, SQLite files, logs, and backups
   are excluded by `.gitignore`.
 
 ## Private files generated on this PC
@@ -17,10 +16,9 @@
 These files are intentionally ignored by Git:
 
 - `.streamlit/community_cloud_secrets.toml`
-- `.streamlit/community_cloud_login_credentials.txt`
 
-The first file is pasted into Streamlit Community Cloud Secrets. The second
-file contains the application login username and generated password.
+This file is pasted into Streamlit Community Cloud Secrets and contains only
+the Turso database connection settings.
 
 ## Security action before deployment
 
@@ -28,8 +26,8 @@ The current Turso token was used for the migration. Because it was shared in a
 chat, revoke it in Turso and issue a new read/write token before deploying.
 Do not paste the replacement token into chat or commit it to Git.
 
-After rotating the token, update only the Turso credentials in the ignored
-Secrets file. The helper preserves the existing application login settings:
+After rotating the token, update the Turso credentials in the ignored Secrets
+file:
 
 ```powershell
 $env:TURSO_DATABASE_URL = "libsql://YOUR_DATABASE.turso.io"
@@ -80,12 +78,10 @@ between PC and smartphone sessions.
 
 ## Verification after deployment
 
-1. Open both Cloud URLs while logged out and confirm no transaction data is
-   visible.
-2. Sign in using the ignored local login credentials file.
-3. Register one test item from the profit calculator.
-4. Confirm it appears in the listing manager without using the local SQLite
+1. Open both Cloud URLs and confirm each app opens directly without a login form.
+2. Register one test item from the profit calculator.
+3. Confirm it appears in the listing manager without using the local SQLite
    file.
-5. Edit the item in the listing manager and confirm the updated value is
+4. Edit the item in the listing manager and confirm the updated value is
    visible from another browser.
-6. Turn off Wi-Fi on the phone and verify both Cloud URLs over 4G/5G.
+5. Turn off Wi-Fi on the phone and verify both Cloud URLs over 4G/5G.

@@ -21,7 +21,6 @@ from app_paths import (  # noqa: E402
     resolve_listing_db_path,
     resolve_registration_event_path,
 )
-from app_auth import require_app_password  # noqa: E402
 from app_database import (  # noqa: E402
     database_location_label,
     get_database_connection,
@@ -3616,7 +3615,6 @@ def render_header() -> None:
         layout="wide",
     )
     inject_responsive_css()
-    require_app_password()
     st.title(TEXT["app_title"])
     st.caption(TEXT["caption"])
 

@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tomllib
 from pathlib import Path
-from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -34,12 +32,6 @@ def normalize_database_url(raw_url: str) -> str:
     return value
 
 
-def require_mapping(value: Any, name: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"Missing or invalid [{name}] section.")
-    return value
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -56,8 +48,6 @@ def main() -> None:
     if not secrets_path.exists():
         raise SystemExit(f"Secrets file does not exist: {secrets_path}")
 
-    current = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
-    auth = require_mapping(current.get("auth"), "auth")
     database_url = normalize_database_url(
         os.environ.get("TURSO_DATABASE_URL", "")
     )
@@ -65,21 +55,8 @@ def main() -> None:
     if not auth_token:
         raise SystemExit("TURSO_AUTH_TOKEN is not set.")
 
-    auth_lines = ["[auth]"]
-    for key in ("REQUIRE_AUTH", "APP_USERNAME", "APP_PASSWORD_HASH"):
-        if key not in auth:
-            raise ValueError(f"Missing auth setting: {key}")
-        value = auth[key]
-        if isinstance(value, bool):
-            rendered = "true" if value else "false"
-        else:
-            rendered = toml_string(str(value))
-        auth_lines.append(f"{key} = {rendered}")
-
     content = "\n".join(
         (
-            *auth_lines,
-            "",
             "[database]",
             f"TURSO_DATABASE_URL = {toml_string(database_url)}",
             f"TURSO_AUTH_TOKEN = {toml_string(auth_token)}",
@@ -95,8 +72,7 @@ def main() -> None:
         pass
 
     print(f"Updated Turso credentials: {secrets_path}")
-    print("Authentication settings were preserved.")
-    print("No database URL, token, password, or hash was printed.")
+    print("No database URL or token was printed.")
 
 
 if __name__ == "__main__":

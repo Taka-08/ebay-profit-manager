@@ -15,7 +15,6 @@ from typing import Any
 
 import streamlit as st
 
-from app_auth import require_app_password
 from app_database import database_location_label, get_database_connection
 from app_paths import (
     resolve_exchange_rate_path,
@@ -3078,7 +3077,6 @@ def inject_compact_css() -> None:
 def render_header() -> None:
     st.set_page_config(page_title="EBリサーチプラス利益計算ツール", layout="wide")
     inject_compact_css()
-    require_app_password()
     st.title("EBリサーチプラス利益計算ツール")
     st.caption("販売プラットフォームに合わせて、必要な費用と利益を計算します。")
 

@@ -1,4 +1,4 @@
-# Authentication, API keys, database tokens, and local environment files
+# API keys, database tokens, Secrets, and local environment files
 .streamlit/secrets.toml
 **/.streamlit/secrets.toml
 **/.streamlit/*secrets*.toml

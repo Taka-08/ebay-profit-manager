@@ -22,24 +22,14 @@ Copy-Item -LiteralPath .\ebay_listing_manager\ebay_listings.sqlite3 `
 
 バックアップも `.gitignore` の対象なので、GitHubへは送信されません。
 
-## 1. ログインパスワードを作る
+## 1. Python環境を用意する
 
 Community Cloudとデータ移行ではPython 3.12を使用します。Python 3.12をインストール
 した後、次を実行します。
 
 ```powershell
 py -3.12 -m pip install -r requirements.txt
-py -3.12 scripts\generate_password_hash.py
 ```
-
-12文字以上のパスワードを2回入力すると、次の形式の1行が表示されます。
-
-```toml
-APP_PASSWORD_HASH = "pbkdf2_sha256$600000$..."
-```
-
-この行とユーザー名は、後でCommunity CloudのSecretsへ設定します。パスワードそのものや
-ハッシュをGitHubのファイルへ書かないでください。
 
 ## 2. 永続データベースを用意する
 
@@ -56,11 +46,6 @@ Tursoの料金・無料枠は変更されることがあるため、作成時に
 `.streamlit/secrets.toml` を新規作成します。この実ファイルはGitから除外されています。
 
 ```toml
-[auth]
-REQUIRE_AUTH = true
-APP_USERNAME = "任意のユーザー名"
-APP_PASSWORD_HASH = "手順1で生成した値"
-
 [database]
 TURSO_DATABASE_URL = "libsql://取得したURL"
 TURSO_AUTH_TOKEN = "取得したToken"
@@ -131,18 +116,18 @@ git push -u origin main
 
 ## 7. 公開後の安全設定
 
-- Community CloudのShare settingsでも、可能なら閲覧者を限定します。
-- アプリ内ログインも有効なままにし、二重に保護します。
+- アプリ内ログインは使用しないため、公開URLを知る人は画面とデータを利用できます。
+- 閲覧者を限定したい場合は、Community Cloud側のShare settingsを使用してください。
 - Secretsを変更した場合は2つのアプリ両方へ同じ変更を反映します。
 - Turso Tokenが漏れた可能性がある場合は、Turso側でTokenを失効し再発行します。
 - GitHubへ実データやSecretsを誤ってcommitした場合は、履歴から消すだけでなくTokenと
-  パスワードも必ず変更します。
+  その他の漏えいした認証情報も必ず変更します。
 
 ## 8. 動作確認
 
-1. Wi-FiのPCでCloud URLを開き、未ログインではデータが見えないことを確認します。
-2. ログインして利益計算からテスト商品を1件登録します。
-3. 出品管理のCloud URLへログインし、同じ商品が表示されることを確認します。
+1. Wi-FiのPCでCloud URLを開き、ログイン画面なしでメイン画面が表示されることを確認します。
+2. 利益計算からテスト商品を1件登録します。
+3. 出品管理のCloud URLを開き、同じ商品が表示されることを確認します。
 4. スマートフォンのWi-Fiを切り、4G・5Gで両URLを開きます。
 5. PCとスマートフォンで同じ登録件数・商品内容になることを確認します。
 6. テスト商品を編集し、別端末側にも反映されることを確認します。

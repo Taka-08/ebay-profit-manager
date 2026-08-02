@@ -53,11 +53,11 @@ PCとスマートフォンは同じ
 `ebay_listing_manager\ebay_listings.sqlite3` を参照します。SQLiteはWALモードと
 待機時間を設定しているため、両方から登録・編集した内容が同じ一覧へ反映されます。
 
-## ログイン保護と外出先からの利用
+## 外出先からの利用
 
-ローカル利用では、認証設定がない場合に従来どおり利用できます。外部公開時は
-Streamlit Secretsのユーザー名とPBKDF2パスワードハッシュでログインを必須にします。
-クラウドDBが設定されているのに認証情報がない場合は、安全のため画面とデータを表示しません。
+利益計算ツールと出品管理ツールは、ログイン画面を使用せずに直接開きます。
+Streamlit Community Cloudで公開した場合、公開URLを知る人は画面とデータを利用できます。
+閲覧者を限定したい場合は、Community Cloud側のShare settingsを使用してください。
 
 Streamlit Community Cloudではローカルファイルの永続性が保証されないため、公開版は
 SQLite互換のTurso Cloudへ接続します。ローカルSQLiteはそのまま残り、自動削除・自動上書き
