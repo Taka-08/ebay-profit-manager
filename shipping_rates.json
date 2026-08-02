@@ -3,10 +3,10 @@
   "currency": "JPY",
   "note": "PDF料金ガイドから抽出した公式料金データ。燃油サーチャージなど外部URL参照の変動費は0円として扱い、必要時はJSON側で更新してください。",
   "source_pdfs": {
-    "japan_post": "C:\\Users\\User\\Downloads\\charges.pdf",
-    "orange": "C:\\Users\\User\\Downloads\\1184103658011230208.pdf",
-    "dhl": "C:\\Users\\User\\Downloads\\RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
-    "fedex": "C:\\Users\\User\\Downloads\\最新2.pdf"
+    "japan_post": "charges.pdf",
+    "orange": "1184103658011230208.pdf",
+    "dhl": "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
+    "fedex": "最新2.pdf"
   },
   "ui_countries": [
     "US",
@@ -150,7 +150,7 @@
       "surcharge_yen": 0,
       "additional_fee_yen": 0,
       "other_additional_fee_yen": 0,
-      "source_pdf": "C:\\Users\\User\\Downloads\\charges.pdf",
+      "source_pdf": "charges.pdf",
       "source_pages": [
         2
       ],
@@ -1449,7 +1449,7 @@
       "surcharge_yen": 0,
       "additional_fee_yen": 0,
       "other_additional_fee_yen": 0,
-      "source_pdf": "C:\\Users\\User\\Downloads\\charges.pdf",
+      "source_pdf": "charges.pdf",
       "source_pages": [
         3
       ],
@@ -2088,7 +2088,7 @@
       "surcharge_yen": 0,
       "additional_fee_yen": 0,
       "other_additional_fee_yen": 0,
-      "source_pdf": "C:\\Users\\User\\Downloads\\charges.pdf",
+      "source_pdf": "charges.pdf",
       "source_pages": [
         4
       ],
@@ -2727,7 +2727,7 @@
       "surcharge_yen": 0,
       "additional_fee_yen": 0,
       "other_additional_fee_yen": 0,
-      "source_pdf": "C:\\Users\\User\\Downloads\\charges.pdf",
+      "source_pdf": "charges.pdf",
       "source_pages": [
         5
       ],
@@ -4119,7 +4119,7 @@
       "surcharge_yen": 0,
       "additional_fee_yen": 0,
       "other_additional_fee_yen": 0,
-      "source_pdf": "C:\\Users\\User\\Downloads\\1184103658011230208.pdf",
+      "source_pdf": "1184103658011230208.pdf",
       "source_pages": [
         4,
         5,
@@ -20043,7 +20043,7 @@
         "DE": "Zone 2",
         "FR": "Zone 1"
       },
-      "source_pdf": "C:\\Users\\User\\Downloads\\RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
+      "source_pdf": "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
       "source_pages": [
         4,
         11,
@@ -20157,7 +20157,7 @@
         "DE": "Zone 2",
         "FR": "Zone 1"
       },
-      "source_pdf": "C:\\Users\\User\\Downloads\\RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
+      "source_pdf": "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
       "source_pages": [
         4,
         11,
@@ -31691,7 +31691,7 @@
         "DE": "Zone 2",
         "FR": "Zone 1"
       },
-      "source_pdf": "C:\\Users\\User\\Downloads\\RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
+      "source_pdf": "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
       "source_pages": [
         4,
         11,
@@ -43225,7 +43225,7 @@
         "DE": "Zone 2",
         "FR": "Zone 1"
       },
-      "source_pdf": "C:\\Users\\User\\Downloads\\RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
+      "source_pdf": "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
       "source_pages": [
         4,
         11,
@@ -54759,7 +54759,7 @@
         "DE": "Zone 2",
         "FR": "Zone 1"
       },
-      "source_pdf": "C:\\Users\\User\\Downloads\\RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
+      "source_pdf": "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
       "source_pages": [
         4,
         11,

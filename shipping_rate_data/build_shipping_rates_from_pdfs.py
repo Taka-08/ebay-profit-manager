@@ -308,7 +308,7 @@ def build_orange_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "surcharge_yen": 0,
         "additional_fee_yen": 0,
         "other_additional_fee_yen": 0,
-        "source_pdf": str(PDF_PATHS["orange"]),
+        "source_pdf": PDF_PATHS["orange"].name,
         "source_pages": [4, 5, 6, 9, 12, 13, 16],
         "rate_book_version": ORANGE_RATE_BOOK_VERSION,
         "effective_from": ORANGE_EFFECTIVE_FROM,
@@ -357,7 +357,7 @@ def build_unregistered_services() -> tuple[list[dict[str, Any]], dict[str, Any]]
 
 def build_japan_post_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     data = json.loads(JAPAN_POST_DATA_PATH.read_text(encoding="utf-8"))
-    source_pdf = str(PDF_PATHS["japan_post"])
+    source_pdf = PDF_PATHS["japan_post"].name
     country_zone_rules = {
         normalize_destination_country(country): zone
         for country, zone in data["ui_country_zone_rules"].items()
@@ -480,7 +480,7 @@ def build_dhl_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "carrier": "DHL",
         "countries": common,
         "country_zone_rules": zone_rules,
-        "source_pdf": str(PDF_PATHS["dhl"]),
+        "source_pdf": PDF_PATHS["dhl"].name,
         "source_pages": [4, 11, 12, 13, 14, 15, 16, 17, 24, 25],
         "fuel_surcharge_rate": 0,
         "surcharge_yen": 0,
@@ -659,7 +659,7 @@ def main() -> None:
         "version": "official-pdf-extract-2026-07-30",
         "currency": "JPY",
         "note": "PDF料金ガイドから抽出した公式料金データ。燃油サーチャージなど外部URL参照の変動費は0円として扱い、必要時はJSON側で更新してください。",
-        "source_pdfs": {key: str(path) for key, path in PDF_PATHS.items()},
+        "source_pdfs": {key: path.name for key, path in PDF_PATHS.items()},
         "ui_countries": list(DEFAULT_DESTINATION_COUNTRY_CODES),
         "metadata": {
             "japan_post": japan_post_metadata,
