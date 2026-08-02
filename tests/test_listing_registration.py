@@ -162,7 +162,7 @@ class ListingRegistrationIntegrationTest(unittest.TestCase):
             if option != selected_option_label
         )
         carrier_and_service = different_option_label.split(" 送料 ", 1)[0]
-        different_carrier, different_service = carrier_and_service.split(" / ", 1)
+        different_carrier, different_service = carrier_and_service.rsplit(" / ", 1)
         registration_radio.set_value(
             f"{different_carrier}::{different_service}"
         )

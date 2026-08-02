@@ -34,6 +34,12 @@ from currency_config import (
     currency_symbol,
     normalize_currency,
 )
+from destination_countries import (
+    DEFAULT_DESTINATION_COUNTRY_CODES,
+    EU27_COUNTRY_CODES,
+    destination_country_label,
+    normalize_destination_country,
+)
 from platform_config import (
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -61,7 +67,7 @@ SHIPPING_RATE_PATH = Path(__file__).with_name("shipping_rates.json")
 ZONOS_CONFIG_PATH = Path(__file__).with_name("zonos_prepay_config.json")
 
 JAPAN_POST_CARRIER = "\u65e5\u672c\u90f5\u4fbf"
-UNITED_STATES_COUNTRY = "\u30a2\u30e1\u30ea\u30ab"
+UNITED_STATES_COUNTRY = "US"
 DEFAULT_SALE_PRICE_FOREIGN = 0.0
 DEFAULT_EBAY_FEE_RATE = 17.50
 DEFAULT_AD_RATE = 0.0
@@ -76,7 +82,7 @@ HIDDEN_SHIPPING_SERVICES = frozenset(
 )
 
 STATUS_ACTIVE = "出品中"
-DEFAULT_COUNTRIES = ("アメリカ", "カナダ", "イギリス", "オーストラリア", "ドイツ", "フランス")
+DEFAULT_COUNTRIES = DEFAULT_DESTINATION_COUNTRY_CODES
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,7 @@ class ProductInputs:
     memo: str = ""
     currency_code: str = DEFAULT_CURRENCY
     usd_jpy_rate: float = DEFAULT_JPY_RATES["USD"]
+    eur_jpy_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,7 @@ class ShippingResult:
     rate_table_weight_g: float | None = None
     effective_from: str = ""
     effective_to: str = ""
+    rate_book_version: str = ""
     zonos_applied: bool = False
     zonos_base_shipping_yen: float | None = None
     zonos_fee_base_yen: float | None = None
@@ -302,6 +310,47 @@ def exchange_rate_request_json(url: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("為替APIの応答形式が不正です。")
     return payload
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_eur_jpy_reference_rate() -> dict[str, Any]:
+    """Fetch EUR/JPY only for the EU 150 EUR shipping-value limit."""
+    symbol = "EURJPY=X"
+    try:
+        payload = exchange_rate_request_json(
+            PRIMARY_EXCHANGE_RATE_API_URL.format(symbol=symbol)
+        )
+        chart = payload.get("chart") or {}
+        results = chart.get("result") or []
+        meta = (results[0].get("meta") or {}) if results else {}
+        rate = meta.get("regularMarketPrice")
+        if (
+            meta.get("symbol") == symbol
+            and meta.get("currency") == "JPY"
+            and isinstance(rate, (int, float))
+            and rate > 0
+        ):
+            return {
+                "rate": float(rate),
+                "source": PRIMARY_EXCHANGE_RATE_API_NAME,
+                "api_updated_at": format_api_timestamp(meta.get("regularMarketTime")),
+            }
+    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, OSError):
+        pass
+
+    payload = exchange_rate_request_json(
+        FALLBACK_EXCHANGE_RATE_API_URL.format(currency="EUR")
+    )
+    rates = payload.get("rates") or {}
+    rate = rates.get("JPY")
+    if payload.get("base_code") != "EUR" or not isinstance(rate, (int, float)) or rate <= 0:
+        raise ValueError("EUR/JPYの有効な参照レートを取得できませんでした。")
+    return {
+        "rate": float(rate),
+        "source": FALLBACK_EXCHANGE_RATE_API_NAME,
+        "api_updated_at": payload.get("time_last_update_utc")
+        or format_api_timestamp(payload.get("time_last_update_unix")),
+    }
 
 
 def format_api_timestamp(timestamp: int | float | None) -> str | None:
@@ -649,11 +698,14 @@ def should_apply_zonos(service: dict[str, Any], inputs: ProductInputs, config: d
         return False
     carrier = str(service.get("carrier", ""))
     service_name = str(service.get("service", ""))
-    countries = config.get("applicable_countries") or []
+    countries = {
+        normalize_destination_country(country)
+        for country in (config.get("applicable_countries") or [])
+    }
     carriers = config.get("applicable_carriers") or []
     services = config.get("applicable_services") or []
     return (
-        inputs.destination_country in countries
+        normalize_destination_country(inputs.destination_country) in countries
         and carrier in carriers
         and service_name in services
     )
@@ -877,7 +929,17 @@ def resolve_service_zone(
     postal_code: str = "",
 ) -> tuple[str | None, str | None]:
     rules = service.get("country_zone_rules") or {}
-    rule = rules.get(country)
+    country_code = normalize_destination_country(country)
+    rule = rules.get(country_code)
+    if rule is None:
+        rule = next(
+            (
+                candidate
+                for rule_country, candidate in rules.items()
+                if normalize_destination_country(rule_country) == country_code
+            ),
+            None,
+        )
     if rule is None:
         return None, "配送対象外の国です"
     if isinstance(rule, str):
@@ -1008,12 +1070,51 @@ def size_limit_reason(service: dict[str, Any], inputs: ProductInputs, zone: str 
     return None
 
 
+def product_value_limit_status(
+    service: dict[str, Any],
+    inputs: ProductInputs,
+    zone: str | None,
+) -> tuple[str | None, str]:
+    limit = zone_value(service, "max_product_value", zone, {}) or {}
+    if not isinstance(limit, dict) or not limit.get("enforced"):
+        return None, ""
+
+    maximum = float(limit.get("amount") or 0)
+    limit_currency = str(limit.get("currency") or "").upper()
+    if maximum <= 0 or not limit_currency:
+        return None, ""
+
+    sale_price_yen = inputs.sale_price_usd * inputs.exchange_rate
+    if limit_currency == "EUR":
+        conversion_rate = float(inputs.eur_jpy_rate or 0)
+    elif limit_currency == inputs.currency_code:
+        conversion_rate = float(inputs.exchange_rate or 0)
+    else:
+        conversion_rate = 0.0
+
+    if conversion_rate <= 0:
+        return (
+            None,
+            f"{maximum:g} {limit_currency}の商品価値上限を判定する為替レートが未入力です。",
+        )
+
+    product_value = sale_price_yen / conversion_rate
+    if product_value > maximum + 1e-9:
+        return (
+            f"商品価値が{maximum:g} {limit_currency}の上限を超えています"
+            f"（換算額 {product_value:,.2f} {limit_currency}）",
+            "",
+        )
+    return None, f"商品価値 {product_value:,.2f} {limit_currency} / 上限 {maximum:g} {limit_currency}"
+
+
 def find_rate_row(
     service: dict[str, Any],
     country: str,
     zone: str | None,
     billing_weight_g: float,
 ) -> dict[str, Any] | None:
+    country_code = normalize_destination_country(country)
     for row in service.get("rates", []):
         row_country = row.get("country")
         row_zone = row.get("zone")
@@ -1021,7 +1122,11 @@ def find_rate_row(
             continue
         if row_zone is not None and zone is None:
             continue
-        if row_country and row_country not in (country, "ALL", "すべて"):
+        if (
+            row_country
+            and row_country not in ("ALL", "すべて")
+            and normalize_destination_country(row_country) != country_code
+        ):
             continue
         if float(row.get("min_weight_g", 0)) <= billing_weight_g <= float(row.get("max_weight_g", 0)):
             return row
@@ -1034,6 +1139,7 @@ def calculate_one_shipping_result(
 ) -> ShippingResult:
     carrier = str(service.get("carrier", ""))
     service_name = str(service.get("service", ""))
+    destination_code = normalize_destination_country(inputs.destination_country)
     result_id = f"{carrier}::{service_name}"
     mode = calculation_mode_label(inputs)
     note = approximate_note(service, inputs)
@@ -1041,22 +1147,48 @@ def calculate_one_shipping_result(
     if service_note:
         note = f"{note}\n{service_note}" if note else service_note
 
-    if inputs.destination_country.strip() == "":
+    if destination_code == "":
         return unavailable_result(result_id, carrier, service_name, inputs, "入力不足", "配送先の国が未入力です")
     if inputs.weight_g <= 0:
         return unavailable_result(result_id, carrier, service_name, inputs, "入力不足", "実重量が未入力です")
 
-    countries = service.get("countries") or []
-    if countries and inputs.destination_country not in countries:
+    countries = {
+        normalize_destination_country(country)
+        for country in (service.get("countries") or [])
+    }
+    if countries and destination_code not in countries:
         return unavailable_result(result_id, carrier, service_name, inputs, "発送不可", "配送対象外の国です")
 
-    zone, zone_reason = resolve_service_zone(service, inputs.destination_country, inputs.postal_code)
+    zone, zone_reason = resolve_service_zone(service, destination_code, inputs.postal_code)
     if zone_reason:
         return unavailable_result(result_id, carrier, service_name, inputs, "発送不可", zone_reason)
 
     size_reason = size_limit_reason(service, inputs, zone)
     if size_reason:
         return unavailable_result(result_id, carrier, service_name, inputs, "発送不可", size_reason)
+
+    value_reason, value_note = product_value_limit_status(service, inputs, zone)
+    if value_note:
+        note = f"{note}\n{value_note}" if note else value_note
+    if value_reason:
+        return unavailable_result(
+            result_id,
+            carrier,
+            service_name,
+            inputs,
+            "発送不可",
+            value_reason,
+            zone=zone or "",
+            source_pdf=str(service.get("source_pdf") or ""),
+            source_pages=tuple(
+                int(page)
+                for page in service.get("source_pages", [])
+                if isinstance(page, int)
+            ),
+            effective_from=str(service.get("effective_from") or ""),
+            effective_to=str(service.get("effective_to") or ""),
+            rate_book_version=str(service.get("rate_book_version") or ""),
+        )
 
     volumetric_weight_g = calculate_volumetric_weight_g(service, inputs)
     weight_basis = service.get("weight_basis", "actual")
@@ -1097,7 +1229,7 @@ def calculate_one_shipping_result(
             billing_weight_g=billing_weight_g,
         )
 
-    rate = find_rate_row(service, inputs.destination_country, zone, billing_weight_g)
+    rate = find_rate_row(service, destination_code, zone, billing_weight_g)
     if rate is None:
         return unavailable_result(
             result_id,
@@ -1115,6 +1247,7 @@ def calculate_one_shipping_result(
             rate_table_weight_g=billing_weight_g,
             effective_from=str(service.get("effective_from") or ""),
             effective_to=str(service.get("effective_to") or ""),
+            rate_book_version=str(service.get("rate_book_version") or ""),
         )
 
     base_shipping_yen = float(rate.get("base_shipping_yen", 0))
@@ -1177,10 +1310,17 @@ def calculate_one_shipping_result(
         note=note,
         zone=zone or "",
         source_pdf=str(service.get("source_pdf") or ""),
-        source_pages=tuple(int(page) for page in service.get("source_pages", []) if isinstance(page, int)),
+        source_pages=(int(rate["source_page"]),)
+        if isinstance(rate.get("source_page"), int)
+        else tuple(
+            int(page)
+            for page in service.get("source_pages", [])
+            if isinstance(page, int)
+        ),
         rate_table_weight_g=float(rate.get("max_weight_g", billing_weight_g)),
         effective_from=str(service.get("effective_from") or ""),
         effective_to=str(service.get("effective_to") or ""),
+        rate_book_version=str(service.get("rate_book_version") or ""),
         zonos_applied=bool(zonos_amounts),
         zonos_base_shipping_yen=zonos_amounts.get("base_shipping_yen") if zonos_amounts else None,
         zonos_fee_base_yen=zonos_amounts.get("fee_base_yen") if zonos_amounts else None,
@@ -1214,6 +1354,7 @@ def unavailable_result(
     rate_table_weight_g: float | None = None,
     effective_from: str = "",
     effective_to: str = "",
+    rate_book_version: str = "",
 ) -> ShippingResult:
     mode = calculation_mode_label(inputs)
     return ShippingResult(
@@ -1243,6 +1384,7 @@ def unavailable_result(
         rate_table_weight_g=rate_table_weight_g,
         effective_from=effective_from,
         effective_to=effective_to,
+        rate_book_version=rate_book_version,
     )
 
 
@@ -1528,7 +1670,7 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
     condition_items = [
         ("配送会社", result.carrier),
         ("サービス名", result.service),
-        ("配送先国", inputs.destination_country),
+        ("配送先国", destination_country_label(inputs.destination_country)),
         ("ゾーン", result.zone or "-"),
         ("計算区分", result.calculation_mode),
         ("実重量", grams(result.actual_weight_g)),
@@ -1583,6 +1725,7 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
     with st.expander("システム情報", expanded=False):
         system_items = [
             ("使用した料金表", Path(result.source_pdf).name if result.source_pdf else "-"),
+            ("料金表バージョン", result.rate_book_version or "-"),
             ("PDFページ", ", ".join(str(page) for page in result.source_pages) if result.source_pages else "-"),
             ("発効日", result.effective_from or "-"),
             ("注意事項", result.note or "-"),
@@ -1810,6 +1953,7 @@ def shipping_breakdown_payload(result: ShippingResult, calculated_at: str) -> di
         "zonos_duty_yen": round(zonos_duty_yen),
         "source_pdf": result.source_pdf,
         "source_pages": list(result.source_pages),
+        "rate_book_version": result.rate_book_version,
         "effective_from": result.effective_from,
         "effective_to": result.effective_to,
         "calculated_at": calculated_at,
@@ -1871,7 +2015,9 @@ def _register_listing(
         else None
     )
     shipping_breakdown = shipping_breakdown_payload(selected_result, now)
-    shipping_breakdown["destination_country"] = inputs.destination_country
+    shipping_breakdown["destination_country"] = normalize_destination_country(
+        inputs.destination_country
+    )
     shipping_breakdown["currency_code"] = inputs.currency_code
     shipping_breakdown["product_exchange_rate"] = inputs.exchange_rate
     shipping_breakdown["usd_jpy_rate"] = inputs.usd_jpy_rate
@@ -1918,7 +2064,7 @@ def _register_listing(
         "status": STATUS_ACTIVE,
         "sku": inputs.sku.strip(),
         "source_url": inputs.source_url.strip(),
-        "destination_country": inputs.destination_country,
+        "destination_country": normalize_destination_country(inputs.destination_country),
         "destination_postal_code": inputs.postal_code.strip(),
         "sale_price_yen": sale_price_yen,
         "package_weight_g": inputs.weight_g,
@@ -3208,7 +3354,11 @@ def render_inputs(
     product_col1, product_col2, product_col3, product_col4 = st.columns([1.35, 0.75, 0.8, 0.8])
     product_name = product_col1.text_input("商品名")
     sku = product_col2.text_input("SKU")
-    destination_country = product_col3.selectbox("配送先の国", DEFAULT_COUNTRIES)
+    destination_country = product_col3.selectbox(
+        "配送先の国",
+        DEFAULT_COUNTRIES,
+        format_func=destination_country_label,
+    )
     postal_code = product_col4.text_input("郵便番号", help="米国向けのOrange Connex / FedExゾーン判定に使用します。")
 
     price_col1, price_col2, price_col3 = st.columns(3)
@@ -3234,6 +3384,63 @@ def render_inputs(
         step=10.0,
         format="%.0f",
     )
+
+    eur_jpy_rate = 0.0
+    if destination_country in EU27_COUNTRY_CODES:
+        with st.expander("EU向け商品価値上限（150 EUR）", expanded=True):
+            if "eur_jpy_reference_rate" not in st.session_state:
+                try:
+                    reference = fetch_eur_jpy_reference_rate()
+                    st.session_state.eur_jpy_reference_rate = float(reference["rate"])
+                    st.session_state.eur_jpy_reference_source = str(reference["source"])
+                    st.session_state.eur_jpy_reference_updated_at = str(
+                        reference.get("api_updated_at") or ""
+                    )
+                except (RuntimeError, ValueError, urllib.error.URLError, TimeoutError, OSError):
+                    st.session_state.eur_jpy_reference_rate = 0.0
+                    st.session_state.eur_jpy_reference_source = "取得失敗"
+                    st.session_state.eur_jpy_reference_updated_at = ""
+
+            eur_col1, eur_col2 = st.columns([1, 1])
+            pending_eur_rate = st.session_state.pop("pending_eur_jpy_rate", None)
+            if pending_eur_rate is not None:
+                st.session_state.input_eur_jpy_rate = float(pending_eur_rate)
+            elif "input_eur_jpy_rate" not in st.session_state:
+                st.session_state.input_eur_jpy_rate = float(
+                    st.session_state.get("eur_jpy_reference_rate", 0.0)
+                )
+            eur_jpy_rate = eur_col1.number_input(
+                "商品価値判定用 EUR/JPYレート",
+                min_value=0.0,
+                step=0.1,
+                format="%.4f",
+                key="input_eur_jpy_rate",
+            )
+            if eur_col2.button("EUR/JPY最新レートに更新", use_container_width=True):
+                try:
+                    fetch_eur_jpy_reference_rate.clear()
+                    reference = fetch_eur_jpy_reference_rate()
+                    st.session_state.eur_jpy_reference_rate = float(reference["rate"])
+                    st.session_state.eur_jpy_reference_source = str(reference["source"])
+                    st.session_state.eur_jpy_reference_updated_at = str(
+                        reference.get("api_updated_at") or ""
+                    )
+                    st.session_state.pending_eur_jpy_rate = float(reference["rate"])
+                    st.rerun()
+                except (RuntimeError, ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+                    st.warning(f"EUR/JPYレートを取得できませんでした: {exc}")
+
+            if eur_jpy_rate > 0:
+                product_value_eur = sale_price_usd * exchange_rate / eur_jpy_rate
+                st.caption(
+                    f"商品価格換算: {product_value_eur:,.2f} EUR / 上限 150 EUR | "
+                    f"取得元: {st.session_state.get('eur_jpy_reference_source', '手動入力')} | "
+                    f"API更新日時: {st.session_state.get('eur_jpy_reference_updated_at') or '-'}"
+                )
+            else:
+                st.warning(
+                    "EUR/JPYレートが未入力のため、150 EURの商品価値上限は警告のみとなります。"
+                )
 
     size_col1, size_col2, size_col3 = st.columns(3)
     length_cm = size_col1.number_input("長さ（cm）", min_value=0.0, value=0.0, step=1.0, format="%.1f")
@@ -3298,6 +3505,7 @@ def render_inputs(
         memo=memo,
         currency_code=currency_code,
         usd_jpy_rate=usd_jpy_rate,
+        eur_jpy_rate=eur_jpy_rate,
     )
 
 

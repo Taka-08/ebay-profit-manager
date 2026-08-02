@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,18 +10,60 @@ import pdfplumber
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from destination_countries import (  # noqa: E402
+    DEFAULT_DESTINATION_COUNTRY_CODES,
+    EU27_COUNTRY_CODES,
+    normalize_destination_country,
+)
+
+
 DOWNLOADS_DIR = Path.home() / "Downloads"
 OUTPUT_PATH = ROOT_DIR / "shipping_rates.json"
 JAPAN_POST_DATA_PATH = Path(__file__).with_name("japan_post_2026_06_manual_extract.json")
 
 PDF_PATHS = {
     "japan_post": DOWNLOADS_DIR / "charges.pdf",
-    "orange": DOWNLOADS_DIR / "Rate Guide of Orange Connex (Multi-Channel) Ship via Economy- JP (1).pdf",
+    "orange": DOWNLOADS_DIR / "1184103658011230208.pdf",
     "dhl": DOWNLOADS_DIR / "RATE GUIDE of eBay SpeedPAK Japan Ship via DHL-JP (1).pdf",
     "fedex": DOWNLOADS_DIR / "RATE GUIDE of eBay SpeedPAK Japan Ship via FedEx-JP (1).pdf",
 }
 
-COMMON_COUNTRIES = ["アメリカ", "カナダ", "イギリス", "オーストラリア", "ドイツ", "フランス"]
+COMMON_COUNTRIES = ["US", "CA", "GB", "AU", "DE", "FR"]
+
+ORANGE_EFFECTIVE_FROM = "2026-07-30"
+ORANGE_RATE_BOOK_VERSION = "orange-connex-economy-japan-2026-07-30"
+ORANGE_EU_TABLE_COUNTRIES = (
+    "DE",
+    "AT",
+    "BE",
+    "BG",
+    "CY",
+    "CZ",
+    "DK",
+    "EE",
+    "ES",
+    "FI",
+    "FR",
+    "GR",
+    "HR",
+    "HU",
+    "IE",
+    "IT",
+    "LT",
+    "LU",
+    "LV",
+    "MT",
+    "NL",
+    "PL",
+    "PT",
+    "RO",
+    "SE",
+    "SI",
+    "SK",
+)
 
 ORANGE_US_NON_MAINLAND_PREFIXES = {
     "006", "007", "008", "009", "967", "968", "969", "995", "996", "997",
@@ -47,18 +90,25 @@ def parse_float(value: str) -> float:
     return float(value.replace(",", "").strip())
 
 
-def add_rate_rows(rows: list[dict[str, Any]], zone: str, weights_to_prices: list[tuple[float, int]]) -> None:
+def add_rate_rows(
+    rows: list[dict[str, Any]],
+    zone: str,
+    weights_to_prices: list[tuple[float, int]],
+    *,
+    source_page: int | None = None,
+) -> None:
     previous_max = 0.0
     for weight_kg, price in sorted(weights_to_prices):
         max_weight_g = round(weight_kg * 1000)
-        rows.append(
-            {
-                "zone": zone,
-                "min_weight_g": previous_max + 0.0001,
-                "max_weight_g": max_weight_g,
-                "base_shipping_yen": price,
-            }
-        )
+        row = {
+            "zone": zone,
+            "min_weight_g": previous_max + 0.0001,
+            "max_weight_g": max_weight_g,
+            "base_shipping_yen": price,
+        }
+        if source_page is not None:
+            row["source_page"] = source_page
+        rows.append(row)
         previous_max = max_weight_g
 
 
@@ -99,38 +149,122 @@ def parse_orange_rate_table(pdf: pdfplumber.PDF, page_number: int) -> list[tuple
     return rates
 
 
+def parse_orange_europe_rate_tables(
+    pdf: pdfplumber.PDF,
+    page_numbers: tuple[int, ...] = (12, 13),
+) -> dict[str, list[tuple[float, int, int]]]:
+    rates_by_country: dict[str, list[tuple[float, int, int]]] = {
+        code: [] for code in ORANGE_EU_TABLE_COUNTRIES
+    }
+    weights: list[float] = []
+    for page_number in page_numbers:
+        tables = pdf.pages[page_number - 1].extract_tables()
+        if len(tables) != 1:
+            raise ValueError(f"Orange Connex EU page {page_number}: expected one table")
+        table = tables[0]
+        header = tuple(str(cell or "").strip() for cell in table[0][1:])
+        if header != ORANGE_EU_TABLE_COUNTRIES:
+            raise ValueError(
+                f"Orange Connex EU page {page_number}: unexpected country columns {header}"
+            )
+        for row in table[1:]:
+            if not row or not str(row[0] or "").strip():
+                continue
+            weight_kg = parse_float(str(row[0]))
+            weights.append(weight_kg)
+            for code, cell in zip(ORANGE_EU_TABLE_COUNTRIES, row[1:]):
+                value = str(cell or "").strip()
+                if not value:
+                    continue
+                rates_by_country[code].append(
+                    (weight_kg, parse_money(value), page_number)
+                )
+
+    if len(weights) != 76 or weights[0] != 0.1 or weights[-1] != 30.0:
+        raise ValueError(
+            "Orange Connex EU table must contain 76 weight rows from 0.1kg to 30kg"
+        )
+    expected_counts = {
+        code: 66 if code == "DE" else 56 if code == "SE" else 76
+        for code in ORANGE_EU_TABLE_COUNTRIES
+    }
+    actual_counts = {code: len(rows) for code, rows in rates_by_country.items()}
+    if actual_counts != expected_counts:
+        raise ValueError(
+            f"Orange Connex EU country rate counts differ: {actual_counts}"
+        )
+    return rates_by_country
+
+
 def build_orange_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     zones = {
-        "US_MAINLAND": {"page": 5, "country": "アメリカ"},
-        "US_NON_MAINLAND": {"page": 6, "country": "アメリカ"},
-        "UK": {"page": 9, "country": "イギリス"},
-        "DE": {"page": 11, "country": "ドイツ"},
-        "AU": {"page": 13, "country": "オーストラリア"},
+        "US_MAINLAND": {"page": 5, "country": "US"},
+        "US_NON_MAINLAND": {"page": 6, "country": "US"},
+        "UK": {"page": 9, "country": "GB"},
+        "AU": {"page": 16, "country": "AU"},
     }
     rows: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     with pdfplumber.open(PDF_PATHS["orange"]) as pdf:
         for zone, info in zones.items():
             parsed = parse_orange_rate_table(pdf, int(info["page"]))
-            add_rate_rows(rows, zone, parsed)
+            add_rate_rows(rows, zone, parsed, source_page=int(info["page"]))
             counts[zone] = len(parsed)
+        europe_rates = parse_orange_europe_rate_tables(pdf)
+        for country_code, country_rates in europe_rates.items():
+            by_page: dict[int, list[tuple[float, int]]] = {}
+            for weight_kg, price_yen, page_number in country_rates:
+                by_page.setdefault(page_number, []).append((weight_kg, price_yen))
+            previous_max_weight_g = 0.0
+            for page_number in sorted(by_page):
+                page_rows: list[dict[str, Any]] = []
+                add_rate_rows(
+                    page_rows,
+                    country_code,
+                    by_page[page_number],
+                    source_page=page_number,
+                )
+                for row in page_rows:
+                    row["min_weight_g"] = previous_max_weight_g + 0.0001
+                    previous_max_weight_g = float(row["max_weight_g"])
+                    rows.append(row)
+            counts[country_code] = len(country_rates)
+
+    eu_max_weights = {
+        code: 25000 if code == "DE" else 20000 if code == "SE" else 30000
+        for code in EU27_COUNTRY_CODES
+    }
+    eu_max_sizes = {
+        code: {
+            "length_cm": 120,
+            "width_cm": 60 if code == "DE" else 40,
+            "height_cm": 60 if code == "DE" else 40,
+            "volume_cm3": 180000,
+        }
+        for code in EU27_COUNTRY_CODES
+    }
+    countries = ["US", "GB", "AU", *EU27_COUNTRY_CODES]
+    country_zone_rules: dict[str, Any] = {
+        "US": {
+            "requires_postal_code": True,
+            "default_zone": "US_MAINLAND",
+            "postal_prefix_zones": [
+                {
+                    "prefixes": sorted(ORANGE_US_NON_MAINLAND_PREFIXES),
+                    "zone": "US_NON_MAINLAND",
+                }
+            ],
+        },
+        "GB": "UK",
+        "AU": "AU",
+        **{code: code for code in EU27_COUNTRY_CODES},
+    }
 
     service = {
         "carrier": "SpeedPAK / CPaSS",
         "service": "SpeedPAK Economy",
-        "countries": ["アメリカ", "イギリス", "ドイツ", "オーストラリア"],
-        "country_zone_rules": {
-            "アメリカ": {
-                "requires_postal_code": True,
-                "default_zone": "US_MAINLAND",
-                "postal_prefix_zones": [
-                    {"prefixes": sorted(ORANGE_US_NON_MAINLAND_PREFIXES), "zone": "US_NON_MAINLAND"}
-                ],
-            },
-            "イギリス": "UK",
-            "ドイツ": "DE",
-            "オーストラリア": "AU",
-        },
+        "countries": countries,
+        "country_zone_rules": country_zone_rules,
         "weight_basis": "greater",
         "volumetric_divisor_cm3_per_kg": 8000,
         "rounding_unit_g": 1,
@@ -139,8 +273,8 @@ def build_orange_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             "US_MAINLAND": 25000,
             "US_NON_MAINLAND": 15000,
             "UK": 25000,
-            "DE": 25000,
             "AU": 22500,
+            **eu_max_weights,
         },
         "max_actual_weight_g_by_zone": {
             "UK": 15000,
@@ -150,22 +284,37 @@ def build_orange_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             "US_MAINLAND": {"length_cm": 66, "length_plus_girth_cm": 274},
             "US_NON_MAINLAND": {"length_cm": 66, "length_plus_girth_cm": 274},
             "UK": {"length_cm": 120, "length_plus_girth_cm": 225},
-            "DE": {"length_cm": 110, "width_cm": 50, "height_cm": 50},
             "AU": {"length_cm": 105, "volume_cm3": 180000},
+            **eu_max_sizes,
+        },
+        "max_product_value_by_zone": {
+            "US_MAINLAND": {"amount": 1300, "currency": "USD"},
+            "US_NON_MAINLAND": {"amount": 1300, "currency": "USD"},
+            "UK": {"amount": 135, "currency": "GBP"},
+            "AU": {"amount": 1000, "currency": "AUD"},
+            **{
+                code: {"amount": 150, "currency": "EUR", "enforced": True}
+                for code in EU27_COUNTRY_CODES
+            },
         },
         "fuel_surcharge_rate": 0,
+        "fuel_surcharge_status": "variable_not_included_in_base_rate",
         "surcharge_yen": 0,
         "additional_fee_yen": 0,
         "other_additional_fee_yen": 0,
         "source_pdf": str(PDF_PATHS["orange"]),
-        "source_pages": [4, 5, 6, 9, 11, 13],
+        "source_pages": [4, 5, 6, 9, 12, 13, 16],
+        "rate_book_version": ORANGE_RATE_BOOK_VERSION,
+        "effective_from": ORANGE_EFFECTIVE_FROM,
         "rates": rows,
     }
     metadata = {
         "rate_rows_by_zone": counts,
-        "zones": len(zones),
-        "countries": 4,
+        "zones": len(zones) + len(EU27_COUNTRY_CODES),
+        "countries": len(countries),
         "rate_count": len(rows),
+        "effective_from": ORANGE_EFFECTIVE_FROM,
+        "rate_book_version": ORANGE_RATE_BOOK_VERSION,
     }
     return [service], metadata
 
@@ -203,6 +352,11 @@ def build_unregistered_services() -> tuple[list[dict[str, Any]], dict[str, Any]]
 def build_japan_post_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     data = json.loads(JAPAN_POST_DATA_PATH.read_text(encoding="utf-8"))
     source_pdf = str(PDF_PATHS["japan_post"])
+    country_zone_rules = {
+        normalize_destination_country(country): zone
+        for country, zone in data["ui_country_zone_rules"].items()
+    }
+    countries = list(country_zone_rules)
     services: list[dict[str, Any]] = []
     row_counts: dict[str, int] = {}
     rate_count = 0
@@ -219,8 +373,8 @@ def build_japan_post_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             {
                 "carrier": service_data["carrier"],
                 "service": service_data["service"],
-                "countries": COMMON_COUNTRIES,
-                "country_zone_rules": data["ui_country_zone_rules"],
+                "countries": countries,
+                "country_zone_rules": country_zone_rules,
                 "weight_basis": service_data["weight_basis"],
                 "rounding_unit_g": service_data["rounding_unit_g"],
                 "max_weight_g": service_data["max_weight_g"],
@@ -239,7 +393,7 @@ def build_japan_post_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metadata = {
         "services": len(services),
         "zones": len(data["zones"]),
-        "countries": len(data["ui_country_zone_rules"]),
+        "countries": len(country_zone_rules),
         "weight_rows_by_service": row_counts,
         "rate_count": rate_count,
         "source_version": data["version"],
@@ -308,12 +462,12 @@ def build_dhl_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     zones = [f"Zone {index}" for index in range(1, 12)]
     envelope_rows, package_rows = extract_dhl_package_rows()
     zone_rules = {
-        "アメリカ": "Zone 10",
-        "カナダ": "Zone 5",
-        "イギリス": "Zone 5",
-        "オーストラリア": "Zone 11",
-        "ドイツ": "Zone 2",
-        "フランス": "Zone 1",
+        "US": "Zone 10",
+        "CA": "Zone 5",
+        "GB": "Zone 5",
+        "AU": "Zone 11",
+        "DE": "Zone 2",
+        "FR": "Zone 1",
     }
     common = list(zone_rules.keys())
     base = {
@@ -386,18 +540,18 @@ def build_fedex_services() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     group1 = ["A", "D", "E", "F", "G", "H", "I", "J", "K", "M", "U"]
     group2 = ["N", "O", "Q", "R", "S", "T", "V", "W", "X", "Y", "Z"]
     zone_rules = {
-        "アメリカ": {
+        "US": {
             "requires_postal_code": True,
             "default_zone": "F",
             "postal_range_zones": [
                 {"start": start, "end": end, "zone": "E"} for start, end in FEDEX_US_WEST_RANGES
             ],
         },
-        "カナダ": "F",
-        "イギリス": "M",
-        "オーストラリア": "U",
-        "ドイツ": "M",
-        "フランス": "M",
+        "CA": "F",
+        "GB": "M",
+        "AU": "U",
+        "DE": "M",
+        "FR": "M",
     }
     common = list(zone_rules.keys())
     ficp_rows_group1 = extract_fedex_rows([13, 14, 15], group1)
@@ -494,11 +648,11 @@ def main() -> None:
     services = japan_post_services + orange_services + unregistered_services + dhl_services + fedex_services
 
     data = {
-        "version": "official-pdf-extract-2026-07-12",
+        "version": "official-pdf-extract-2026-07-30",
         "currency": "JPY",
         "note": "PDF料金ガイドから抽出した公式料金データ。燃油サーチャージなど外部URL参照の変動費は0円として扱い、必要時はJSON側で更新してください。",
         "source_pdfs": {key: str(path) for key, path in PDF_PATHS.items()},
-        "ui_countries": COMMON_COUNTRIES,
+        "ui_countries": list(DEFAULT_DESTINATION_COUNTRY_CODES),
         "metadata": {
             "japan_post": japan_post_metadata,
             "orange": orange_metadata,
