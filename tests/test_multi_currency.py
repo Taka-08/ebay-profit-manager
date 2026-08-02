@@ -424,7 +424,9 @@ class MultiCurrencyTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             row = connection.execute(
                 """
-                SELECT product_name, currency_code, actual_fee_schema_version
+                SELECT product_name, currency_code, actual_fee_schema_version,
+                       country_of_origin, mfn_rate_percent,
+                       us_tariff_rule_version
                 FROM listings
                 """
             ).fetchone()
@@ -433,6 +435,9 @@ class MultiCurrencyTest(unittest.TestCase):
                 "既存USD商品",
                 "USD",
                 manager_app.ACTUAL_FEE_SCHEMA_LEGACY,
+                "",
+                None,
+                "",
             ),
             row,
         )

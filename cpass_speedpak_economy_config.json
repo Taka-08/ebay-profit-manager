@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "name": "cPass eBay SpeedPAK Economy U.S. DDP estimate",
+      "version": "cpass-speedpak-economy-us-2026-08-02",
+      "destination_country": "US",
+      "effective_from": "2026-08-02",
+      "effective_to": "",
+      "service": {
+        "carrier": "SpeedPAK / CPaSS",
+        "name": "SpeedPAK Economy"
+      },
+      "transport_rate_reference": {
+        "carrier": "SpeedPAK / CPaSS",
+        "service": "SpeedPAK Economy",
+        "source_pdf": "1184103658011230208.pdf",
+        "source_pages": [4, 5, 6, 7, 8],
+        "effective_from": "2026-07-30",
+        "rate_book_version": "orange-connex-economy-japan-2026-07-30",
+        "dimension_rounding": "none",
+        "volumetric_divisor_cm3_per_kg": 8000,
+        "billing_weight_increment_g": 1
+      },
+      "transport_adjustment": {
+        "multiplier": 0.9523809523809523,
+        "equivalent_fraction": "20/21",
+        "rounding": "half_up_yen",
+        "source_type": "observed_cpass_samples",
+        "observed_at": "2026-08-02",
+        "sample_count": 4,
+        "official_status": "not_stated_in_supplied_guides",
+        "note": "A single common multiplier reproduces all four supplied cPass transport charges from the official Orange Connex Economy table."
+      },
+      "fees": {
+        "fuel_surcharge": {
+          "rate_percent": 12.0,
+          "basis": "base_transport_yen",
+          "rounding": "half_up_yen",
+          "source_type": "observed_cpass_samples",
+          "observed_at": "2026-08-02",
+          "variable": true
+        },
+        "import_clearance": {
+          "amount_yen": 245,
+          "rounding": "none",
+          "source_type": "official_orange_connex_economy_guide_and_observed_samples",
+          "source_pdf": "1184103658011230208.pdf",
+          "source_page": 8
+        },
+        "estimated_duty_tax": {
+          "basis": "declared_product_value_jpy",
+          "rate_source": "us_tariff_rules.json",
+          "hts_rate_table_status": "not_provided_in_source_pdf"
+        },
+        "duty_processing": {
+          "rate_percent": 2.1,
+          "basis": "estimated_duty_tax_yen",
+          "rounding": "half_up_yen",
+          "source_type": "official_and_observed",
+          "source_pdf": "最新2.pdf",
+          "source_pages": [11, 40]
+        }
+      },
+      "conditional_surcharges": {
+        "out_of_gauge": {
+          "any_dimension_over_cm": 55.88,
+          "volume_over_cm3": 55000,
+          "fee_yen": 2475,
+          "source_pdf": "1184103658011230208.pdf",
+          "source_page": 7
+        },
+        "oversize": {
+          "longest_over_cm": 243,
+          "length_plus_girth_over_cm": 330,
+          "fee_yen": 8800,
+          "minimum_billing_weight_g": 18000
+        },
+        "additional_handling": {
+          "fee_yen": 3390,
+          "dimension": {
+            "longest_over_cm": 121,
+            "second_longest_over_cm": 76,
+            "length_plus_girth_over_cm": 266,
+            "minimum_billing_weight_g": 18000
+          },
+          "weight": {
+            "actual_weight_over_g": 25000
+          },
+          "packaging": {
+            "requires_manual_input": true
+          }
+        },
+        "residential_delivery": {
+          "amount_yen": 0,
+          "ficp_free": true
+        },
+        "oda_opa": {
+          "status": "not_automatically_applied",
+          "reason": "Current postal-code level list is external and was not included in the supplied PDF."
+        },
+        "congestion": {
+          "status": "not_automatically_applied",
+          "reason": "Rate and period are maintained in an external Orange Connex file."
+        },
+        "address_correction": {
+          "amount_yen": 1420,
+          "requires_manual_event": true
+        },
+        "manual_document_handling": {
+          "amount_yen": 500,
+          "requires_manual_event": true
+        }
+      },
+      "calculation_notes": {
+        "official": [
+          "Orange Connex Economy country and base transport rate table",
+          "Dimensional weight uses divisor 8000 for Orange Connex Economy",
+          "Duty taxable base excludes freight and insurance",
+          "Duty processing rate is 2.1 percent"
+        ],
+        "observed": [
+          "The cPass transport charge was the published Orange Connex Economy rate times 20/21, rounded half up, in all four supplied samples",
+          "Fuel surcharge was 12 percent of transport in all four supplied samples",
+          "Import clearance was 245 JPY in all four supplied samples",
+          "Processing fee rounded duty times 2.1 percent to the nearest yen"
+        ],
+        "unresolved": [
+          "The supplied guides do not state the reason or future validity period for the observed 20/21 transport adjustment",
+          "The Ship via FedEx guide uses divisor 5000, but the supplied cPass Economy samples match the direct Orange Connex Economy divisor 8000 and rate table",
+          "The source PDF does not provide an HTS-specific preset duty-rate table"
+        ],
+        "ship_via_fedex_reference": {
+          "source_pdf": "最新2.pdf",
+          "effective_from": "2026-05-08",
+          "volumetric_divisor_cm3_per_kg": 5000,
+          "status": "reviewed_but_not_used_for_direct_orange_connex_economy_transport"
+        }
+      }
+    }
+  ]
+}

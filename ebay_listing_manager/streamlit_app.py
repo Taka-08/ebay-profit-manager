@@ -210,6 +210,18 @@ TEXT = {
     "zonos_total_shipping_yen": "Zonos込み配送関連費用",
     "zonos_config_effective_from": "Zonos設定発効日",
     "zonos_config_effective_to": "Zonos設定終了日",
+    "country_of_origin": "原産国（COO）",
+    "mfn_rate_percent": "MFN税率（%）",
+    "us_tariff_estimated_rate_percent": "原産国別見積比率（%）",
+    "us_tariff_applied_rate_percent": "適用関税率（%）",
+    "us_tariff_base_yen": "米国関税対象額",
+    "us_tariff_amount_yen": "米国推定関税額",
+    "us_tariff_rule_name": "米国関税ルール名",
+    "us_tariff_rule_version": "米国関税ルールバージョン",
+    "us_tariff_rule_effective_date": "米国関税ルール発効日",
+    "us_tariff_rule_applied_date": "米国関税ルール適用日",
+    "us_tariff_calculated_at": "米国関税計算日時",
+    "us_tariff_legacy_compatibility": "旧関税ルール互換",
     "registered_at": "\u767b\u9332\u65e5\u6642",
     "sales_fee_input_mode": "販売手数料の入力方法",
     "sales_fee_rate": "販売手数料率（%）",
@@ -293,6 +305,18 @@ DISPLAY_COLUMNS = {
     "zonos_total_shipping_yen": TEXT["zonos_total_shipping_yen"],
     "zonos_config_effective_from": TEXT["zonos_config_effective_from"],
     "zonos_config_effective_to": TEXT["zonos_config_effective_to"],
+    "country_of_origin": TEXT["country_of_origin"],
+    "mfn_rate_percent": TEXT["mfn_rate_percent"],
+    "us_tariff_estimated_rate_percent": TEXT["us_tariff_estimated_rate_percent"],
+    "us_tariff_applied_rate_percent": TEXT["us_tariff_applied_rate_percent"],
+    "us_tariff_base_yen": TEXT["us_tariff_base_yen"],
+    "us_tariff_amount_yen": TEXT["us_tariff_amount_yen"],
+    "us_tariff_rule_name": TEXT["us_tariff_rule_name"],
+    "us_tariff_rule_version": TEXT["us_tariff_rule_version"],
+    "us_tariff_rule_effective_date": TEXT["us_tariff_rule_effective_date"],
+    "us_tariff_rule_applied_date": TEXT["us_tariff_rule_applied_date"],
+    "us_tariff_calculated_at": TEXT["us_tariff_calculated_at"],
+    "us_tariff_legacy_compatibility": TEXT["us_tariff_legacy_compatibility"],
     "registered_at": TEXT["registered_at"],
     "sales_fee_input_mode": TEXT["sales_fee_input_mode"],
     "sales_fee_rate": TEXT["sales_fee_rate"],
@@ -606,6 +630,11 @@ def init_db() -> None:
             "source_url": "TEXT NOT NULL DEFAULT ''",
             "destination_country": "TEXT NOT NULL DEFAULT ''",
             "destination_postal_code": "TEXT NOT NULL DEFAULT ''",
+            "declared_quantity": "INTEGER NOT NULL DEFAULT 1",
+            "declared_unit_price_foreign": "REAL NOT NULL DEFAULT 0",
+            "declared_total_value_foreign": "REAL NOT NULL DEFAULT 0",
+            "hts_code": "TEXT NOT NULL DEFAULT ''",
+            "shipping_incoterm": "TEXT NOT NULL DEFAULT ''",
             "sale_price_yen": "REAL NOT NULL DEFAULT 0",
             "package_weight_g": "REAL NOT NULL DEFAULT 0",
             "package_length_cm": "REAL NOT NULL DEFAULT 0",
@@ -640,6 +669,27 @@ def init_db() -> None:
             "zonos_total_shipping_yen": "REAL NOT NULL DEFAULT 0",
             "zonos_config_effective_from": "TEXT NOT NULL DEFAULT ''",
             "zonos_config_effective_to": "TEXT NOT NULL DEFAULT ''",
+            "country_of_origin": "TEXT NOT NULL DEFAULT ''",
+            "mfn_rate_percent": "REAL",
+            "us_tariff_estimated_rate_percent": "REAL",
+            "us_tariff_applied_rate_percent": "REAL",
+            "us_tariff_base_yen": "REAL",
+            "us_tariff_amount_yen": "REAL",
+            "us_tariff_rule_name": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_rule_version": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_rule_effective_date": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_rule_applied_date": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_calculated_at": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_legacy_compatibility": "INTEGER NOT NULL DEFAULT 0",
+            "cpass_applied": "INTEGER NOT NULL DEFAULT 0",
+            "cpass_published_base_transport_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_transport_adjustment_rate_percent": "REAL NOT NULL DEFAULT 0",
+            "cpass_import_clearance_fee_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_estimated_duty_tax_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_duty_processing_fee_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_conditional_surcharge_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_profile_version": "TEXT NOT NULL DEFAULT ''",
+            "cpass_calculated_at": "TEXT NOT NULL DEFAULT ''",
             "registered_at": "TEXT",
             "sales_fee_input_mode": "TEXT NOT NULL DEFAULT 'rate'",
             "sales_fee_rate": "REAL NOT NULL DEFAULT 0",
@@ -2379,6 +2429,18 @@ def normalize_row(row: dict[str, object]) -> dict[str, object]:
     result["zonos_total_shipping_yen"] = value(row, "zonos_total_shipping_yen")
     result["zonos_config_effective_from"] = str(row.get("zonos_config_effective_from") or "")
     result["zonos_config_effective_to"] = str(row.get("zonos_config_effective_to") or "")
+    result["country_of_origin"] = str(row.get("country_of_origin") or "")
+    result["mfn_rate_percent"] = optional_value(row, "mfn_rate_percent")
+    result["us_tariff_estimated_rate_percent"] = optional_value(row, "us_tariff_estimated_rate_percent")
+    result["us_tariff_applied_rate_percent"] = optional_value(row, "us_tariff_applied_rate_percent")
+    result["us_tariff_base_yen"] = optional_value(row, "us_tariff_base_yen")
+    result["us_tariff_amount_yen"] = optional_value(row, "us_tariff_amount_yen")
+    result["us_tariff_rule_name"] = str(row.get("us_tariff_rule_name") or "")
+    result["us_tariff_rule_version"] = str(row.get("us_tariff_rule_version") or "")
+    result["us_tariff_rule_effective_date"] = str(row.get("us_tariff_rule_effective_date") or "")
+    result["us_tariff_rule_applied_date"] = str(row.get("us_tariff_rule_applied_date") or "")
+    result["us_tariff_calculated_at"] = str(row.get("us_tariff_calculated_at") or "")
+    result["us_tariff_legacy_compatibility"] = value(row, "us_tariff_legacy_compatibility")
     result["registered_at"] = str(row.get("registered_at") or "")
     result["sales_fee_input_mode"] = str(
         row.get("sales_fee_input_mode") or FEE_MODE_RATE
@@ -2614,6 +2676,18 @@ def format_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 DISPLAY_COLUMNS["zonos_total_shipping_yen"]: row.get("zonos_total_shipping_yen", 0),
                 DISPLAY_COLUMNS["zonos_config_effective_from"]: row.get("zonos_config_effective_from", ""),
                 DISPLAY_COLUMNS["zonos_config_effective_to"]: row.get("zonos_config_effective_to", ""),
+                DISPLAY_COLUMNS["country_of_origin"]: row.get("country_of_origin", ""),
+                DISPLAY_COLUMNS["mfn_rate_percent"]: display_value(row.get("mfn_rate_percent")),
+                DISPLAY_COLUMNS["us_tariff_estimated_rate_percent"]: display_value(row.get("us_tariff_estimated_rate_percent")),
+                DISPLAY_COLUMNS["us_tariff_applied_rate_percent"]: display_value(row.get("us_tariff_applied_rate_percent")),
+                DISPLAY_COLUMNS["us_tariff_base_yen"]: display_value(row.get("us_tariff_base_yen")),
+                DISPLAY_COLUMNS["us_tariff_amount_yen"]: display_value(row.get("us_tariff_amount_yen")),
+                DISPLAY_COLUMNS["us_tariff_rule_name"]: row.get("us_tariff_rule_name", ""),
+                DISPLAY_COLUMNS["us_tariff_rule_version"]: row.get("us_tariff_rule_version", ""),
+                DISPLAY_COLUMNS["us_tariff_rule_effective_date"]: row.get("us_tariff_rule_effective_date", ""),
+                DISPLAY_COLUMNS["us_tariff_rule_applied_date"]: row.get("us_tariff_rule_applied_date", ""),
+                DISPLAY_COLUMNS["us_tariff_calculated_at"]: row.get("us_tariff_calculated_at", ""),
+                DISPLAY_COLUMNS["us_tariff_legacy_compatibility"]: "あり" if value(row, "us_tariff_legacy_compatibility") else "",
                 DISPLAY_COLUMNS["registered_at"]: row.get("registered_at", ""),
                 DISPLAY_COLUMNS["sales_fee_input_mode"]: row.get("sales_fee_input_mode", ""),
                 DISPLAY_COLUMNS["sales_fee_rate"]: row.get("sales_fee_rate", 0),

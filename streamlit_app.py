@@ -34,6 +34,19 @@ from currency_config import (
     currency_symbol,
     normalize_currency,
 )
+from cpass_speedpak import (
+    active_cpass_profile,
+    calculate_conditional_charges,
+    calculate_cpass_shipping_breakdown,
+    effective_declared_value,
+    rounded_package_dimensions_cm,
+)
+from destination_countries import (
+    DEFAULT_DESTINATION_COUNTRY_CODES,
+    EU27_COUNTRY_CODES,
+    destination_country_label,
+    normalize_destination_country,
+)
 from platform_config import (
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -43,6 +56,12 @@ from platform_config import (
     PLATFORM_OPTIONS,
     SimpleProfitCalculation,
     calculate_simple_profit,
+)
+from us_tariff import (
+    UNSPECIFIED_ORIGIN,
+    calculate_us_duty_amount,
+    origin_label,
+    supported_origins,
 )
 
 
@@ -61,7 +80,7 @@ SHIPPING_RATE_PATH = Path(__file__).with_name("shipping_rates.json")
 ZONOS_CONFIG_PATH = Path(__file__).with_name("zonos_prepay_config.json")
 
 JAPAN_POST_CARRIER = "\u65e5\u672c\u90f5\u4fbf"
-UNITED_STATES_COUNTRY = "\u30a2\u30e1\u30ea\u30ab"
+UNITED_STATES_COUNTRY = "US"
 DEFAULT_SALE_PRICE_FOREIGN = 0.0
 DEFAULT_EBAY_FEE_RATE = 17.50
 DEFAULT_AD_RATE = 0.0
@@ -76,7 +95,7 @@ HIDDEN_SHIPPING_SERVICES = frozenset(
 )
 
 STATUS_ACTIVE = "出品中"
-DEFAULT_COUNTRIES = ("アメリカ", "カナダ", "イギリス", "オーストラリア", "ドイツ", "フランス")
+DEFAULT_COUNTRIES = DEFAULT_DESTINATION_COUNTRY_CODES
 
 
 @dataclass(frozen=True)
@@ -106,6 +125,15 @@ class ProductInputs:
     memo: str = ""
     currency_code: str = DEFAULT_CURRENCY
     usd_jpy_rate: float = DEFAULT_JPY_RATES["USD"]
+    country_of_origin: str = UNSPECIFIED_ORIGIN
+    mfn_rate_percent: float = 0.0
+    us_tariff_rule_date: str = ""
+    eur_jpy_rate: float = 0.0
+    declared_quantity: int = 1
+    declared_unit_price_foreign: float = 0.0
+    declared_total_value_foreign: float = 0.0
+    hts_code: str = ""
+    shipping_incoterm: str = "DDP"
 
 
 @dataclass(frozen=True)
@@ -154,6 +182,7 @@ class ShippingResult:
     rate_table_weight_g: float | None = None
     effective_from: str = ""
     effective_to: str = ""
+    rate_book_version: str = ""
     zonos_applied: bool = False
     zonos_base_shipping_yen: float | None = None
     zonos_fee_base_yen: float | None = None
@@ -167,6 +196,36 @@ class ShippingResult:
     zonos_config_effective_to: str = ""
     zonos_calculated_at: str = ""
     zonos_note: str = ""
+    us_tariff_country_of_origin: str = ""
+    us_tariff_mfn_rate_percent: float | None = None
+    us_tariff_estimated_rate_percent: float | None = None
+    us_tariff_applied_rate_percent: float | None = None
+    us_tariff_base_yen: float | None = None
+    us_tariff_amount_yen: float | None = None
+    us_tariff_rule_name: str = ""
+    us_tariff_rule_version: str = ""
+    us_tariff_rule_effective_date: str = ""
+    us_tariff_rule_applied_date: str = ""
+    us_tariff_calculated_at: str = ""
+    us_tariff_legacy_compatibility: bool = False
+    cpass_applied: bool = False
+    cpass_published_base_transport_yen: float | None = None
+    cpass_transport_adjustment_rate_percent: float | None = None
+    cpass_import_clearance_fee_yen: float | None = None
+    cpass_estimated_duty_tax_yen: float | None = None
+    cpass_duty_processing_fee_yen: float | None = None
+    cpass_conditional_surcharge_yen: float | None = None
+    cpass_declared_value_foreign: float | None = None
+    cpass_declared_currency: str = ""
+    cpass_quantity: int = 1
+    cpass_hts_code: str = ""
+    cpass_incoterm: str = ""
+    cpass_fuel_surcharge_rate_percent: float | None = None
+    cpass_duty_processing_rate_percent: float | None = None
+    cpass_profile_name: str = ""
+    cpass_profile_version: str = ""
+    cpass_calculated_at: str = ""
+    cpass_conditional_charge_labels: tuple[str, ...] = ()
     is_recommended: bool = False
     is_cheapest: bool = False
 
@@ -302,6 +361,47 @@ def exchange_rate_request_json(url: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("為替APIの応答形式が不正です。")
     return payload
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_eur_jpy_reference_rate() -> dict[str, Any]:
+    """Fetch EUR/JPY only for the EU 150 EUR shipping-value limit."""
+    symbol = "EURJPY=X"
+    try:
+        payload = exchange_rate_request_json(
+            PRIMARY_EXCHANGE_RATE_API_URL.format(symbol=symbol)
+        )
+        chart = payload.get("chart") or {}
+        results = chart.get("result") or []
+        meta = (results[0].get("meta") or {}) if results else {}
+        rate = meta.get("regularMarketPrice")
+        if (
+            meta.get("symbol") == symbol
+            and meta.get("currency") == "JPY"
+            and isinstance(rate, (int, float))
+            and rate > 0
+        ):
+            return {
+                "rate": float(rate),
+                "source": PRIMARY_EXCHANGE_RATE_API_NAME,
+                "api_updated_at": format_api_timestamp(meta.get("regularMarketTime")),
+            }
+    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, OSError):
+        pass
+
+    payload = exchange_rate_request_json(
+        FALLBACK_EXCHANGE_RATE_API_URL.format(currency="EUR")
+    )
+    rates = payload.get("rates") or {}
+    rate = rates.get("JPY")
+    if payload.get("base_code") != "EUR" or not isinstance(rate, (int, float)) or rate <= 0:
+        raise ValueError("EUR/JPYの有効な参照レートを取得できませんでした。")
+    return {
+        "rate": float(rate),
+        "source": FALLBACK_EXCHANGE_RATE_API_NAME,
+        "api_updated_at": payload.get("time_last_update_utc")
+        or format_api_timestamp(payload.get("time_last_update_unix")),
+    }
 
 
 def format_api_timestamp(timestamp: int | float | None) -> str | None:
@@ -580,7 +680,7 @@ def default_zonos_config() -> dict[str, Any]:
                 {"amountJpy": 20000, "ratePercent": 3.91},
             ],
         },
-        "note": "US-bound Japan Post shipments use Zonos Prepay with Section 122 duty.",
+        "note": "US-bound Japan Post shipments use Zonos Prepay with the versioned U.S. tariff engine.",
     }
 
 
@@ -649,14 +749,50 @@ def should_apply_zonos(service: dict[str, Any], inputs: ProductInputs, config: d
         return False
     carrier = str(service.get("carrier", ""))
     service_name = str(service.get("service", ""))
-    countries = config.get("applicable_countries") or []
+    countries = {
+        normalize_destination_country(country)
+        for country in (config.get("applicable_countries") or [])
+    }
     carriers = config.get("applicable_carriers") or []
     services = config.get("applicable_services") or []
     return (
-        inputs.destination_country in countries
+        normalize_destination_country(inputs.destination_country) in countries
         and carrier in carriers
         and service_name in services
     )
+
+
+def calculate_us_tariff_snapshot(
+    inputs: ProductInputs,
+    *,
+    legacy_rate_percent: float | None = None,
+) -> dict[str, Any] | None:
+    if normalize_destination_country(inputs.destination_country) != UNITED_STATES_COUNTRY:
+        return None
+    tariff = calculate_us_duty_amount(
+        country_of_origin=inputs.country_of_origin,
+        mfn_rate_percent=inputs.mfn_rate_percent,
+        product_price=inputs.sale_price_usd,
+        exchange_rate=inputs.exchange_rate,
+        rule_date=inputs.us_tariff_rule_date or date.today(),
+        legacy_rate_percent=legacy_rate_percent,
+    )
+    return {
+        "product_price_yen": tariff.product_price_yen,
+        "country_of_origin": tariff.rate.country_of_origin,
+        "mfn_rate_percent": tariff.rate.mfn_rate_percent,
+        "estimated_rate_percent": tariff.rate.estimated_rate_percent,
+        "applied_rate_percent": tariff.rate.applied_rate_percent,
+        "duty_rate_percent": tariff.rate.applied_rate_percent,
+        "duty_base_yen": tariff.taxable_base_yen,
+        "duty_yen": tariff.duty_amount_yen,
+        "rule_name": tariff.rate.rule_name,
+        "rule_version": tariff.rate.rule_version,
+        "rule_effective_date": tariff.rate.rule_effective_date,
+        "rule_applied_date": tariff.rate.rule_applied_date,
+        "calculated_at": tariff.calculated_at,
+        "legacy_compatibility": tariff.rate.legacy_compatibility,
+    }
 
 
 def calculate_zonos_amounts(
@@ -668,14 +804,20 @@ def calculate_zonos_amounts(
     if not should_apply_zonos(service, inputs, config):
         return None
 
-    sale_price_yen = inputs.sale_price_usd * inputs.exchange_rate
     duty_config = config.get("duty") or {}
     fee_config = config.get("fee") or {}
     rounding = str(fee_config.get("rounding") or "half_up")
 
-    duty_rate = float(duty_config.get("rate_percent", 10.0) or 0)
-    duty_base = zonos_base_amount(str(duty_config.get("base") or "product_price_yen"), sale_price_yen, base_shipping_total_yen)
-    duty_yen = round_yen(duty_base * duty_rate / 100, rounding)
+    tariff = calculate_us_tariff_snapshot(
+        inputs,
+        legacy_rate_percent=float(duty_config.get("rate_percent", 10.0) or 0),
+    )
+    if tariff is None:
+        return None
+    sale_price_yen = float(tariff["product_price_yen"])
+    duty_rate = float(tariff["applied_rate_percent"])
+    duty_base = float(tariff["duty_base_yen"])
+    duty_yen = float(tariff["duty_yen"])
 
     fee_base = zonos_base_amount(str(fee_config.get("base") or "product_price_yen_plus_shipping"), sale_price_yen, base_shipping_total_yen)
     fee_rate = zonos_fee_rate_percent(fee_base, list(fee_config.get("points") or []))
@@ -692,10 +834,23 @@ def calculate_zonos_amounts(
         "duty_base_yen": duty_base,
         "duty_yen": duty_yen,
         "total_shipping_yen": total,
-        "effective_from": str(duty_config.get("effective_from") or fee_config.get("effective_from") or ""),
+        "effective_from": str(
+            duty_config.get("effective_from")
+            or fee_config.get("effective_from")
+            or ""
+        ),
         "effective_to": str(duty_config.get("effective_to") or fee_config.get("effective_to") or ""),
-        "calculated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "note": str(config.get("note") or ""),
+        "calculated_at": tariff["calculated_at"],
+        "note": f"{config.get('note') or ''} Rule: {tariff['rule_version']}".strip(),
+        "country_of_origin": tariff["country_of_origin"],
+        "mfn_rate_percent": tariff["mfn_rate_percent"],
+        "estimated_rate_percent": tariff["estimated_rate_percent"],
+        "applied_rate_percent": tariff["applied_rate_percent"],
+        "rule_name": tariff["rule_name"],
+        "rule_version": tariff["rule_version"],
+        "rule_effective_date": tariff["rule_effective_date"],
+        "rule_applied_date": tariff["rule_applied_date"],
+        "legacy_compatibility": tariff["legacy_compatibility"],
     }
 
 
@@ -711,6 +866,36 @@ def load_shipping_rate_book() -> dict[str, Any]:
         st.error("送料データの形式が正しくありません。")
         return {"services": []}
     return data
+
+
+def resolve_calculation_service(
+    service: dict[str, Any],
+    inputs: ProductInputs,
+    rate_book: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach the versioned U.S. cPass fee profile to Orange Connex Economy."""
+    if not (
+        str(service.get("carrier") or "") == "SpeedPAK / CPaSS"
+        and str(service.get("service") or "") == "SpeedPAK Economy"
+        and normalize_destination_country(inputs.destination_country) == UNITED_STATES_COUNTRY
+    ):
+        return service
+
+    profile = active_cpass_profile(
+        UNITED_STATES_COUNTRY,
+        inputs.us_tariff_rule_date or date.today(),
+    )
+    if profile is None:
+        return service
+    resolved = dict(service)
+    resolved["fuel_surcharge_rate"] = 0
+    resolved["surcharge_yen"] = 0
+    resolved["additional_fee_yen"] = 0
+    resolved["other_additional_fee_yen"] = 0
+    resolved["effective_from"] = str(profile.get("effective_from") or "")
+    resolved["rate_book_version"] = str(profile.get("version") or "")
+    resolved["_cpass_profile"] = profile
+    return resolved
 
 
 def get_connection() -> Any:
@@ -798,6 +983,11 @@ def init_listing_db() -> None:
             "source_url": "TEXT NOT NULL DEFAULT ''",
             "destination_country": "TEXT NOT NULL DEFAULT ''",
             "destination_postal_code": "TEXT NOT NULL DEFAULT ''",
+            "declared_quantity": "INTEGER NOT NULL DEFAULT 1",
+            "declared_unit_price_foreign": "REAL NOT NULL DEFAULT 0",
+            "declared_total_value_foreign": "REAL NOT NULL DEFAULT 0",
+            "hts_code": "TEXT NOT NULL DEFAULT ''",
+            "shipping_incoterm": "TEXT NOT NULL DEFAULT ''",
             "sale_price_yen": "REAL NOT NULL DEFAULT 0",
             "package_weight_g": "REAL NOT NULL DEFAULT 0",
             "package_length_cm": "REAL NOT NULL DEFAULT 0",
@@ -836,6 +1026,27 @@ def init_listing_db() -> None:
             "zonos_total_shipping_yen": "REAL NOT NULL DEFAULT 0",
             "zonos_config_effective_from": "TEXT NOT NULL DEFAULT ''",
             "zonos_config_effective_to": "TEXT NOT NULL DEFAULT ''",
+            "country_of_origin": "TEXT NOT NULL DEFAULT ''",
+            "mfn_rate_percent": "REAL",
+            "us_tariff_estimated_rate_percent": "REAL",
+            "us_tariff_applied_rate_percent": "REAL",
+            "us_tariff_base_yen": "REAL",
+            "us_tariff_amount_yen": "REAL",
+            "us_tariff_rule_name": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_rule_version": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_rule_effective_date": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_rule_applied_date": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_calculated_at": "TEXT NOT NULL DEFAULT ''",
+            "us_tariff_legacy_compatibility": "INTEGER NOT NULL DEFAULT 0",
+            "cpass_applied": "INTEGER NOT NULL DEFAULT 0",
+            "cpass_published_base_transport_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_transport_adjustment_rate_percent": "REAL NOT NULL DEFAULT 0",
+            "cpass_import_clearance_fee_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_estimated_duty_tax_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_duty_processing_fee_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_conditional_surcharge_yen": "REAL NOT NULL DEFAULT 0",
+            "cpass_profile_version": "TEXT NOT NULL DEFAULT ''",
+            "cpass_calculated_at": "TEXT NOT NULL DEFAULT ''",
             "registered_at": "TEXT",
             "sales_fee_input_mode": "TEXT NOT NULL DEFAULT 'rate'",
             "sales_fee_rate": "REAL NOT NULL DEFAULT 0",
@@ -877,7 +1088,17 @@ def resolve_service_zone(
     postal_code: str = "",
 ) -> tuple[str | None, str | None]:
     rules = service.get("country_zone_rules") or {}
-    rule = rules.get(country)
+    country_code = normalize_destination_country(country)
+    rule = rules.get(country_code)
+    if rule is None:
+        rule = next(
+            (
+                candidate
+                for rule_country, candidate in rules.items()
+                if normalize_destination_country(rule_country) == country_code
+            ),
+            None,
+        )
     if rule is None:
         return None, "配送対象外の国です"
     if isinstance(rule, str):
@@ -968,7 +1189,10 @@ def calculate_volumetric_weight_g(
         return None
     if not size_complete(inputs):
         return None
-    volume_cm3 = inputs.length_cm * inputs.width_cm * inputs.height_cm
+    dimensions = (inputs.length_cm, inputs.width_cm, inputs.height_cm)
+    if service.get("round_dimensions_cm") == "ceil_each_cm":
+        dimensions = rounded_package_dimensions_cm(*dimensions)
+    volume_cm3 = dimensions[0] * dimensions[1] * dimensions[2]
     return volume_cm3 / float(divisor) * 1000
 
 
@@ -1008,12 +1232,51 @@ def size_limit_reason(service: dict[str, Any], inputs: ProductInputs, zone: str 
     return None
 
 
+def product_value_limit_status(
+    service: dict[str, Any],
+    inputs: ProductInputs,
+    zone: str | None,
+) -> tuple[str | None, str]:
+    limit = zone_value(service, "max_product_value", zone, {}) or {}
+    if not isinstance(limit, dict) or not limit.get("enforced"):
+        return None, ""
+
+    maximum = float(limit.get("amount") or 0)
+    limit_currency = str(limit.get("currency") or "").upper()
+    if maximum <= 0 or not limit_currency:
+        return None, ""
+
+    sale_price_yen = inputs.sale_price_usd * inputs.exchange_rate
+    if limit_currency == "EUR":
+        conversion_rate = float(inputs.eur_jpy_rate or 0)
+    elif limit_currency == inputs.currency_code:
+        conversion_rate = float(inputs.exchange_rate or 0)
+    else:
+        conversion_rate = 0.0
+
+    if conversion_rate <= 0:
+        return (
+            None,
+            f"{maximum:g} {limit_currency}の商品価値上限を判定する為替レートが未入力です。",
+        )
+
+    product_value = sale_price_yen / conversion_rate
+    if product_value > maximum + 1e-9:
+        return (
+            f"商品価値が{maximum:g} {limit_currency}の上限を超えています"
+            f"（換算額 {product_value:,.2f} {limit_currency}）",
+            "",
+        )
+    return None, f"商品価値 {product_value:,.2f} {limit_currency} / 上限 {maximum:g} {limit_currency}"
+
+
 def find_rate_row(
     service: dict[str, Any],
     country: str,
     zone: str | None,
     billing_weight_g: float,
 ) -> dict[str, Any] | None:
+    country_code = normalize_destination_country(country)
     for row in service.get("rates", []):
         row_country = row.get("country")
         row_zone = row.get("zone")
@@ -1021,7 +1284,11 @@ def find_rate_row(
             continue
         if row_zone is not None and zone is None:
             continue
-        if row_country and row_country not in (country, "ALL", "すべて"):
+        if (
+            row_country
+            and row_country not in ("ALL", "すべて")
+            and normalize_destination_country(row_country) != country_code
+        ):
             continue
         if float(row.get("min_weight_g", 0)) <= billing_weight_g <= float(row.get("max_weight_g", 0)):
             return row
@@ -1031,9 +1298,22 @@ def find_rate_row(
 def calculate_one_shipping_result(
     service: dict[str, Any],
     inputs: ProductInputs,
+    rate_book: dict[str, Any] | None = None,
 ) -> ShippingResult:
+    needs_cpass_profile = (
+        str(service.get("carrier") or "") == "SpeedPAK / CPaSS"
+        and str(service.get("service") or "") == "SpeedPAK Economy"
+        and normalize_destination_country(inputs.destination_country) == UNITED_STATES_COUNTRY
+    )
+    if rate_book is not None or needs_cpass_profile:
+        service = resolve_calculation_service(
+            service,
+            inputs,
+            rate_book or load_shipping_rate_book(),
+        )
     carrier = str(service.get("carrier", ""))
     service_name = str(service.get("service", ""))
+    destination_code = normalize_destination_country(inputs.destination_country)
     result_id = f"{carrier}::{service_name}"
     mode = calculation_mode_label(inputs)
     note = approximate_note(service, inputs)
@@ -1041,22 +1321,48 @@ def calculate_one_shipping_result(
     if service_note:
         note = f"{note}\n{service_note}" if note else service_note
 
-    if inputs.destination_country.strip() == "":
+    if destination_code == "":
         return unavailable_result(result_id, carrier, service_name, inputs, "入力不足", "配送先の国が未入力です")
     if inputs.weight_g <= 0:
         return unavailable_result(result_id, carrier, service_name, inputs, "入力不足", "実重量が未入力です")
 
-    countries = service.get("countries") or []
-    if countries and inputs.destination_country not in countries:
+    countries = {
+        normalize_destination_country(country)
+        for country in (service.get("countries") or [])
+    }
+    if countries and destination_code not in countries:
         return unavailable_result(result_id, carrier, service_name, inputs, "発送不可", "配送対象外の国です")
 
-    zone, zone_reason = resolve_service_zone(service, inputs.destination_country, inputs.postal_code)
+    zone, zone_reason = resolve_service_zone(service, destination_code, inputs.postal_code)
     if zone_reason:
         return unavailable_result(result_id, carrier, service_name, inputs, "発送不可", zone_reason)
 
     size_reason = size_limit_reason(service, inputs, zone)
     if size_reason:
         return unavailable_result(result_id, carrier, service_name, inputs, "発送不可", size_reason)
+
+    value_reason, value_note = product_value_limit_status(service, inputs, zone)
+    if value_note:
+        note = f"{note}\n{value_note}" if note else value_note
+    if value_reason:
+        return unavailable_result(
+            result_id,
+            carrier,
+            service_name,
+            inputs,
+            "発送不可",
+            value_reason,
+            zone=zone or "",
+            source_pdf=str(service.get("source_pdf") or ""),
+            source_pages=tuple(
+                int(page)
+                for page in service.get("source_pages", [])
+                if isinstance(page, int)
+            ),
+            effective_from=str(service.get("effective_from") or ""),
+            effective_to=str(service.get("effective_to") or ""),
+            rate_book_version=str(service.get("rate_book_version") or ""),
+        )
 
     volumetric_weight_g = calculate_volumetric_weight_g(service, inputs)
     weight_basis = service.get("weight_basis", "actual")
@@ -1066,6 +1372,21 @@ def calculate_one_shipping_result(
         applied_weight_g = volumetric_weight_g
     else:
         applied_weight_g = inputs.weight_g
+
+    cpass_profile = service.get("_cpass_profile")
+    cpass_conditional = None
+    if isinstance(cpass_profile, dict):
+        cpass_conditional = calculate_conditional_charges(
+            cpass_profile,
+            length_cm=inputs.length_cm,
+            width_cm=inputs.width_cm,
+            height_cm=inputs.height_cm,
+            actual_weight_g=inputs.weight_g,
+        )
+        applied_weight_g = max(
+            applied_weight_g,
+            cpass_conditional.minimum_billing_weight_g,
+        )
 
     rounding_unit_g = float(service.get("rounding_unit_g") or 1)
     billing_weight_g = ceil_to_unit(applied_weight_g, rounding_unit_g)
@@ -1097,7 +1418,7 @@ def calculate_one_shipping_result(
             billing_weight_g=billing_weight_g,
         )
 
-    rate = find_rate_row(service, inputs.destination_country, zone, billing_weight_g)
+    rate = find_rate_row(service, destination_code, zone, billing_weight_g)
     if rate is None:
         return unavailable_result(
             result_id,
@@ -1115,6 +1436,7 @@ def calculate_one_shipping_result(
             rate_table_weight_g=billing_weight_g,
             effective_from=str(service.get("effective_from") or ""),
             effective_to=str(service.get("effective_to") or ""),
+            rate_book_version=str(service.get("rate_book_version") or ""),
         )
 
     base_shipping_yen = float(rate.get("base_shipping_yen", 0))
@@ -1130,12 +1452,67 @@ def calculate_one_shipping_result(
         + additional_fee_yen
         + other_additional_fee_yen
     )
-    sale_price_yen = inputs.sale_price_usd * inputs.exchange_rate
     gross_sales_yen = inputs.sale_price_usd * inputs.exchange_rate
+    us_tariff_snapshot = calculate_us_tariff_snapshot(inputs)
+    cpass_amounts = None
+    if isinstance(cpass_profile, dict):
+        declared_value = effective_declared_value(
+            inputs.sale_price_usd,
+            inputs.declared_unit_price_foreign,
+            inputs.declared_quantity,
+            inputs.declared_total_value_foreign,
+        )
+        cpass_amounts = calculate_cpass_shipping_breakdown(
+            profile=cpass_profile,
+            published_base_transport_yen=base_shipping_yen,
+            declared_value_foreign=declared_value,
+            declared_currency=inputs.currency_code,
+            exchange_rate=inputs.exchange_rate,
+            quantity=inputs.declared_quantity,
+            country_of_origin=inputs.country_of_origin,
+            mfn_rate_percent=inputs.mfn_rate_percent,
+            rule_date=inputs.us_tariff_rule_date or date.today(),
+            hts_code=inputs.hts_code,
+            incoterm=inputs.shipping_incoterm,
+            conditional_surcharge_yen=(
+                cpass_conditional.amount_yen if cpass_conditional else 0.0
+            ),
+            conditional_charge_labels=(
+                cpass_conditional.labels if cpass_conditional else ()
+            ),
+        )
+        base_shipping_yen = cpass_amounts.base_transport_yen
+        fuel_surcharge_yen = cpass_amounts.fuel_surcharge_yen
+        surcharge_yen = 0.0
+        additional_fee_yen = 0.0
+        other_additional_fee_yen = 0.0
+        total_shipping_yen = cpass_amounts.total_shipping_yen
+        us_tariff_snapshot = {
+            "country_of_origin": cpass_amounts.tariff.rate.country_of_origin,
+            "mfn_rate_percent": cpass_amounts.tariff.rate.mfn_rate_percent,
+            "estimated_rate_percent": cpass_amounts.tariff.rate.estimated_rate_percent,
+            "applied_rate_percent": cpass_amounts.tariff.rate.applied_rate_percent,
+            "duty_base_yen": cpass_amounts.tariff.taxable_base_yen,
+            "duty_yen": cpass_amounts.tariff.duty_amount_yen,
+            "rule_name": cpass_amounts.tariff.rate.rule_name,
+            "rule_version": cpass_amounts.tariff.rate.rule_version,
+            "rule_effective_date": cpass_amounts.tariff.rate.rule_effective_date,
+            "rule_applied_date": cpass_amounts.tariff.rate.rule_applied_date,
+            "calculated_at": cpass_amounts.tariff.calculated_at,
+            "legacy_compatibility": cpass_amounts.tariff.rate.legacy_compatibility,
+        }
+        note = (
+            f"{note}\ncPass見積: Orange Connex Economy公式掲載運賃 + "
+            "実測共通の運送料調整 + cPassの米国向け費用。"
+            "運送料調整と燃油12%は提供された実測時点の設定値です。"
+        ).strip()
+        if inputs.hts_code:
+            note += " HTSコードは保存しますが、PDFにHTS別率表がないため税率検索には未使用です。"
     zonos_amounts = calculate_zonos_amounts(service, inputs, total_shipping_yen)
     if zonos_amounts:
         total_shipping_yen = float(zonos_amounts["total_shipping_yen"])
         note = f"{note}\nZonos Prepay included." if note else "Zonos Prepay included."
+    tariff_snapshot = zonos_amounts or us_tariff_snapshot or {}
     ebay_fee_yen = gross_sales_yen * inputs.ebay_fee_rate / 100
     overseas_fee_yen = gross_sales_yen * inputs.overseas_fee_rate / 100
     ad_fee_yen = gross_sales_yen * inputs.ad_rate / 100
@@ -1177,10 +1554,17 @@ def calculate_one_shipping_result(
         note=note,
         zone=zone or "",
         source_pdf=str(service.get("source_pdf") or ""),
-        source_pages=tuple(int(page) for page in service.get("source_pages", []) if isinstance(page, int)),
+        source_pages=(int(rate["source_page"]),)
+        if isinstance(rate.get("source_page"), int)
+        else tuple(
+            int(page)
+            for page in service.get("source_pages", [])
+            if isinstance(page, int)
+        ),
         rate_table_weight_g=float(rate.get("max_weight_g", billing_weight_g)),
         effective_from=str(service.get("effective_from") or ""),
         effective_to=str(service.get("effective_to") or ""),
+        rate_book_version=str(service.get("rate_book_version") or ""),
         zonos_applied=bool(zonos_amounts),
         zonos_base_shipping_yen=zonos_amounts.get("base_shipping_yen") if zonos_amounts else None,
         zonos_fee_base_yen=zonos_amounts.get("fee_base_yen") if zonos_amounts else None,
@@ -1194,6 +1578,56 @@ def calculate_one_shipping_result(
         zonos_config_effective_to=zonos_amounts.get("effective_to", "") if zonos_amounts else "",
         zonos_calculated_at=zonos_amounts.get("calculated_at", "") if zonos_amounts else "",
         zonos_note=zonos_amounts.get("note", "") if zonos_amounts else "",
+        us_tariff_country_of_origin=str(tariff_snapshot.get("country_of_origin") or ""),
+        us_tariff_mfn_rate_percent=tariff_snapshot.get("mfn_rate_percent"),
+        us_tariff_estimated_rate_percent=tariff_snapshot.get("estimated_rate_percent"),
+        us_tariff_applied_rate_percent=tariff_snapshot.get("applied_rate_percent"),
+        us_tariff_base_yen=tariff_snapshot.get("duty_base_yen"),
+        us_tariff_amount_yen=tariff_snapshot.get("duty_yen"),
+        us_tariff_rule_name=str(tariff_snapshot.get("rule_name") or ""),
+        us_tariff_rule_version=str(tariff_snapshot.get("rule_version") or ""),
+        us_tariff_rule_effective_date=str(tariff_snapshot.get("rule_effective_date") or ""),
+        us_tariff_rule_applied_date=str(tariff_snapshot.get("rule_applied_date") or ""),
+        us_tariff_calculated_at=str(tariff_snapshot.get("calculated_at") or ""),
+        us_tariff_legacy_compatibility=bool(tariff_snapshot.get("legacy_compatibility")),
+        cpass_applied=bool(cpass_amounts),
+        cpass_published_base_transport_yen=(
+            cpass_amounts.published_base_transport_yen if cpass_amounts else None
+        ),
+        cpass_transport_adjustment_rate_percent=(
+            cpass_amounts.transport_adjustment_rate_percent if cpass_amounts else None
+        ),
+        cpass_import_clearance_fee_yen=(
+            cpass_amounts.import_clearance_fee_yen if cpass_amounts else None
+        ),
+        cpass_estimated_duty_tax_yen=(
+            cpass_amounts.estimated_duty_tax_yen if cpass_amounts else None
+        ),
+        cpass_duty_processing_fee_yen=(
+            cpass_amounts.duty_processing_fee_yen if cpass_amounts else None
+        ),
+        cpass_conditional_surcharge_yen=(
+            cpass_amounts.conditional_surcharge_yen if cpass_amounts else None
+        ),
+        cpass_declared_value_foreign=(
+            cpass_amounts.declared_value_foreign if cpass_amounts else None
+        ),
+        cpass_declared_currency=(cpass_amounts.declared_currency if cpass_amounts else ""),
+        cpass_quantity=(cpass_amounts.quantity if cpass_amounts else 1),
+        cpass_hts_code=(cpass_amounts.hts_code if cpass_amounts else ""),
+        cpass_incoterm=(cpass_amounts.incoterm if cpass_amounts else ""),
+        cpass_fuel_surcharge_rate_percent=(
+            cpass_amounts.fuel_surcharge_rate_percent if cpass_amounts else None
+        ),
+        cpass_duty_processing_rate_percent=(
+            cpass_amounts.duty_processing_rate_percent if cpass_amounts else None
+        ),
+        cpass_profile_name=(cpass_amounts.profile_name if cpass_amounts else ""),
+        cpass_profile_version=(cpass_amounts.profile_version if cpass_amounts else ""),
+        cpass_calculated_at=(cpass_amounts.calculated_at if cpass_amounts else ""),
+        cpass_conditional_charge_labels=(
+            cpass_amounts.conditional_charge_labels if cpass_amounts else ()
+        ),
     )
 
 
@@ -1214,6 +1648,7 @@ def unavailable_result(
     rate_table_weight_g: float | None = None,
     effective_from: str = "",
     effective_to: str = "",
+    rate_book_version: str = "",
 ) -> ShippingResult:
     mode = calculation_mode_label(inputs)
     return ShippingResult(
@@ -1243,13 +1678,14 @@ def unavailable_result(
         rate_table_weight_g=rate_table_weight_g,
         effective_from=effective_from,
         effective_to=effective_to,
+        rate_book_version=rate_book_version,
     )
 
 
 def calculate_shipping_results(inputs: ProductInputs) -> list[ShippingResult]:
     rate_book = load_shipping_rate_book()
     results = [
-        calculate_one_shipping_result(service, inputs)
+        calculate_one_shipping_result(service, inputs, rate_book)
         for service in rate_book.get("services", [])
         if (
             str(service.get("carrier") or ""),
@@ -1310,6 +1746,10 @@ def shipping_results_table(results: list[ShippingResult]) -> list[dict[str, Any]
                 "請求重量(g)": result.billing_weight_g,
                 "基本送料": result.base_shipping_yen,
                 "燃油サーチャージ": result.fuel_surcharge_yen,
+                "輸入通関手数料": result.cpass_import_clearance_fee_yen,
+                "推定関税および税金": result.cpass_estimated_duty_tax_yen,
+                "推定関税処理手数料": result.cpass_duty_processing_fee_yen,
+                "cPass条件付き追加料金": result.cpass_conditional_surcharge_yen,
                 "割増料金": result.surcharge_yen,
                 "その他追加料金": (result.additional_fee_yen or 0) + (result.other_additional_fee_yen or 0)
                 if result.shippable
@@ -1369,6 +1809,17 @@ def result_detail_html(result: ShippingResult) -> str:
         ("請求重量", grams(result.billing_weight_g)),
         ("基本送料", compact_yen(result.base_shipping_yen)),
         ("燃油サーチャージ", compact_yen(result.fuel_surcharge_yen)),
+    ]
+    if result.cpass_applied:
+        detail_rows.extend(
+            [
+                ("輸入通関手数料", compact_yen(result.cpass_import_clearance_fee_yen)),
+                ("推定関税および税金", compact_yen(result.cpass_estimated_duty_tax_yen)),
+                ("推定関税処理手数料", compact_yen(result.cpass_duty_processing_fee_yen)),
+            ]
+        )
+    detail_rows.extend(
+        [
         ("割増料金", compact_yen(result.surcharge_yen)),
         (
             "追加料金",
@@ -1383,7 +1834,8 @@ def result_detail_html(result: ShippingResult) -> str:
         ("利益率", percent(result.profit_margin)),
         ("発送可否", html.escape(result.status)),
         ("理由・注意", html.escape(result.reason or result.note or "-")),
-    ]
+        ]
+    )
     rows = "".join(
         f"<tr><th>{label}</th><td>{value}</td></tr>"
         for label, value in detail_rows
@@ -1405,6 +1857,8 @@ def carrier_filter_value(label: str) -> str | None:
 
 def result_labels(result: ShippingResult, group_results: list[ShippingResult]) -> list[str]:
     labels: list[str] = []
+    if result.cpass_applied:
+        labels.append("cPass見積")
     if result.zonos_applied:
         labels.append("Zonos込み")
     if result.is_recommended:
@@ -1431,7 +1885,7 @@ def render_label_badges(labels: list[str]) -> None:
         return
     html_badges = []
     for label in labels:
-        css_class = "badge-zonos" if "Zonos" in label else "badge-best" if "おすすめ" in label else "badge-cheap"
+        css_class = "badge-zonos" if any(word in label for word in ("Zonos", "cPass")) else "badge-best" if "おすすめ" in label else "badge-cheap"
         if label == "選択中":
             css_class = "badge-selected"
         html_badges.append(f'<span class="badge {css_class}">{html.escape(label)}</span>')
@@ -1474,6 +1928,8 @@ def detail_breakdown_row(label: str, value: str, css_class: str = "") -> str:
 
 def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
     labels: list[str] = []
+    if result.cpass_applied:
+        labels.append("cPass見積")
     if result.zonos_applied:
         labels.append("Zonos込み")
     if result.is_recommended:
@@ -1483,7 +1939,7 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
     if st.session_state.get("selected_shipping_result_id") == result.result_id:
         labels.append("選択中")
     label_html = "".join(
-        f'<span class="badge {"badge-zonos" if "Zonos" in label else "badge-best" if "おすすめ" in label else "badge-cheap"}">{html.escape(label)}</span>'
+        f'<span class="badge {"badge-zonos" if any(word in label for word in ("Zonos", "cPass")) else "badge-best" if "おすすめ" in label else "badge-cheap"}">{html.escape(label)}</span>'
         for label in labels
     )
     profit_class = "profit-positive" if (result.profit_yen or 0) >= 0 else "profit-negative"
@@ -1506,15 +1962,27 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
         + (result.additional_fee_yen or 0)
         + (result.other_additional_fee_yen or 0)
     )
-    shipping_rows = [
-        detail_breakdown_row("日本郵便基本送料" if result.zonos_applied else "基本送料", compact_yen(result.zonos_base_shipping_yen if result.zonos_applied else result.base_shipping_yen), "shipping-line"),
-        detail_breakdown_row("+ Zonos手数料", compact_yen(result.zonos_fee_yen), "zonos-line") if result.zonos_applied else "",
-        detail_breakdown_row("+ 関税", compact_yen(result.zonos_duty_yen), "duty-line") if result.zonos_applied else "",
-        detail_breakdown_row("+ 燃油サーチャージ", compact_yen(result.fuel_surcharge_yen)),
-        detail_breakdown_row("+ 追加料金", compact_yen(extra_fees) if result.shippable else "-"),
-        '<div class="breakdown-divider"></div>',
-        detail_breakdown_row("合計送料", compact_yen(result.total_shipping_yen), "total-line"),
-    ]
+    if result.cpass_applied:
+        shipping_rows = [
+            detail_breakdown_row("運送料金", compact_yen(result.base_shipping_yen), "shipping-line"),
+            detail_breakdown_row("+ 輸入通関手数料", compact_yen(result.cpass_import_clearance_fee_yen)),
+            detail_breakdown_row("+ 推定関税および税金", compact_yen(result.cpass_estimated_duty_tax_yen), "duty-line"),
+            detail_breakdown_row("+ 燃料割増金", compact_yen(result.fuel_surcharge_yen)),
+            detail_breakdown_row("+ 推定関税処理手数料", compact_yen(result.cpass_duty_processing_fee_yen)),
+            detail_breakdown_row("+ 条件付き追加料金", compact_yen(result.cpass_conditional_surcharge_yen)),
+            '<div class="breakdown-divider"></div>',
+            detail_breakdown_row("推定配送料", compact_yen(result.total_shipping_yen), "total-line"),
+        ]
+    else:
+        shipping_rows = [
+            detail_breakdown_row("日本郵便基本送料" if result.zonos_applied else "基本送料", compact_yen(result.zonos_base_shipping_yen if result.zonos_applied else result.base_shipping_yen), "shipping-line"),
+            detail_breakdown_row("+ Zonos手数料", compact_yen(result.zonos_fee_yen), "zonos-line") if result.zonos_applied else "",
+            detail_breakdown_row("+ 関税", compact_yen(result.zonos_duty_yen), "duty-line") if result.zonos_applied else "",
+            detail_breakdown_row("+ 燃油サーチャージ", compact_yen(result.fuel_surcharge_yen)),
+            detail_breakdown_row("+ 追加料金", compact_yen(extra_fees) if result.shippable else "-"),
+            '<div class="breakdown-divider"></div>',
+            detail_breakdown_row("合計送料", compact_yen(result.total_shipping_yen), "total-line"),
+        ]
     st.markdown(
         f"""
         <div class="detail-section">
@@ -1525,10 +1993,60 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
         unsafe_allow_html=True,
     )
 
+    if result.cpass_applied:
+        with st.expander("cPass / SpeedPAK Economy 計算情報", expanded=False):
+            cpass_items = [
+                ("数量", f"{result.cpass_quantity:,}"),
+                ("公式掲載運賃", compact_yen(result.cpass_published_base_transport_yen)),
+                (
+                    "cPass運送料調整率",
+                    f"{result.cpass_transport_adjustment_rate_percent:+.4f}%"
+                    if result.cpass_transport_adjustment_rate_percent is not None
+                    else "-",
+                ),
+                ("cPass表示運送料金", compact_yen(result.base_shipping_yen)),
+                (
+                    "申告総価格",
+                    currency_amount(
+                        result.cpass_declared_value_foreign or 0,
+                        result.cpass_declared_currency or inputs.currency_code,
+                    ),
+                ),
+                ("原産国（COO）", origin_label(result.us_tariff_country_of_origin)),
+                ("HTS / HSコード", result.cpass_hts_code or "未入力"),
+                ("インコタームズ", result.cpass_incoterm or "DDP"),
+                (
+                    "適用関税率",
+                    f"{result.us_tariff_applied_rate_percent:.2f}%"
+                    if result.us_tariff_applied_rate_percent is not None
+                    else "-",
+                ),
+                ("関税対象額", compact_yen(result.us_tariff_base_yen)),
+                (
+                    "燃油割増率",
+                    f"{result.cpass_fuel_surcharge_rate_percent:.2f}%"
+                    if result.cpass_fuel_surcharge_rate_percent is not None
+                    else "-",
+                ),
+                (
+                    "関税処理手数料率",
+                    f"{result.cpass_duty_processing_rate_percent:.2f}%"
+                    if result.cpass_duty_processing_rate_percent is not None
+                    else "-",
+                ),
+                ("cPass設定バージョン", result.cpass_profile_version or "-"),
+                ("計算日時", result.cpass_calculated_at or "-"),
+            ]
+            st.markdown(detail_kv_grid(cpass_items), unsafe_allow_html=True)
+            st.caption(
+                "HTSコードは保存されますが、添付PDFにHTS別の事前設定率表がないため、"
+                "現段階の推定関税は原産国別率とMFN入力を使用します。"
+            )
+
     condition_items = [
         ("配送会社", result.carrier),
         ("サービス名", result.service),
-        ("配送先国", inputs.destination_country),
+        ("配送先国", destination_country_label(inputs.destination_country)),
         ("ゾーン", result.zone or "-"),
         ("計算区分", result.calculation_mode),
         ("実重量", grams(result.actual_weight_g)),
@@ -1560,21 +2078,40 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
                 ),
                 ("商品価格円換算", compact_yen(inputs.sale_price_usd * inputs.exchange_rate)),
                 ("為替レート", f"{inputs.currency_code}/JPY {inputs.exchange_rate:.4f}"),
+                ("原産国（COO）", origin_label(result.us_tariff_country_of_origin)),
+                (
+                    "MFN税率",
+                    f"{result.us_tariff_mfn_rate_percent:.2f}%"
+                    if result.us_tariff_mfn_rate_percent is not None
+                    else "-",
+                ),
+                (
+                    "原産国別見積比率",
+                    f"{result.us_tariff_estimated_rate_percent:.2f}%"
+                    if result.us_tariff_estimated_rate_percent is not None
+                    else "旧ルール互換",
+                ),
                 ("Zonos手数料基準額", compact_yen(result.zonos_fee_base_yen)),
                 ("適用された手数料率", f"{result.zonos_fee_rate_percent:.2f}%" if result.zonos_fee_rate_percent is not None else "-"),
-                ("関税率", f"{result.zonos_duty_rate_percent:.2f}%" if result.zonos_duty_rate_percent is not None else "-"),
+                ("適用関税率", f"{result.us_tariff_applied_rate_percent:.2f}%" if result.us_tariff_applied_rate_percent is not None else "-"),
                 ("関税対象額", compact_yen(result.zonos_duty_base_yen)),
                 ("関税額", compact_yen(result.zonos_duty_yen)),
                 ("Zonos込み配送関連費用", compact_yen(result.zonos_total_shipping_yen)),
             ]
             st.markdown(detail_kv_grid(zonos_items), unsafe_allow_html=True)
+            if result.us_tariff_legacy_compatibility:
+                st.warning("原産国未指定または新ルール適用日前のため、旧10%ルール互換で計算しています。")
             if st.button("Zonosの計算式を見る", key=f"zonos_formula_{result.result_id}"):
                 st.markdown(
                     detail_kv_grid(
                         [
                             ("計算式", "日本郵便基本送料 + Zonos手数料 + 関税 = Zonos込み配送関連費用"),
-                            ("計算日時", result.zonos_calculated_at or "-"),
-                            ("発効日", result.zonos_config_effective_from or "-"),
+                            ("関税計算式", "商品価格の円換算額 × 適用関税率"),
+                            ("関税ルール", result.us_tariff_rule_name or "-"),
+                            ("ルールバージョン", result.us_tariff_rule_version or "-"),
+                            ("ルール適用日", result.us_tariff_rule_applied_date or "-"),
+                            ("計算日時", result.us_tariff_calculated_at or result.zonos_calculated_at or "-"),
+                            ("発効日", result.us_tariff_rule_effective_date or result.zonos_config_effective_from or "-"),
                         ]
                     ),
                     unsafe_allow_html=True,
@@ -1583,6 +2120,7 @@ def render_result_detail(inputs: ProductInputs, result: ShippingResult) -> None:
     with st.expander("システム情報", expanded=False):
         system_items = [
             ("使用した料金表", Path(result.source_pdf).name if result.source_pdf else "-"),
+            ("料金表バージョン", result.rate_book_version or "-"),
             ("PDFページ", ", ".join(str(page) for page in result.source_pages) if result.source_pages else "-"),
             ("発効日", result.effective_from or "-"),
             ("注意事項", result.note or "-"),
@@ -1759,15 +2297,29 @@ def shipping_breakdown_payload(result: ShippingResult, calculated_at: str) -> di
     other_additional_fee_yen = float(result.other_additional_fee_yen or 0)
     zonos_fee_yen = float(result.zonos_fee_yen or 0)
     zonos_duty_yen = float(result.zonos_duty_yen or 0)
-    visible_total = (
-        base_shipping_yen
-        + fuel_surcharge_yen
-        + surcharge_yen
-        + additional_fee_yen
-        + other_additional_fee_yen
-        + zonos_fee_yen
-        + zonos_duty_yen
-    )
+    cpass_import_clearance_yen = float(result.cpass_import_clearance_fee_yen or 0)
+    cpass_duty_yen = float(result.cpass_estimated_duty_tax_yen or 0)
+    cpass_processing_yen = float(result.cpass_duty_processing_fee_yen or 0)
+    cpass_conditional_yen = float(result.cpass_conditional_surcharge_yen or 0)
+    if result.cpass_applied:
+        visible_total = (
+            base_shipping_yen
+            + fuel_surcharge_yen
+            + cpass_import_clearance_yen
+            + cpass_duty_yen
+            + cpass_processing_yen
+            + cpass_conditional_yen
+        )
+    else:
+        visible_total = (
+            base_shipping_yen
+            + fuel_surcharge_yen
+            + surcharge_yen
+            + additional_fee_yen
+            + other_additional_fee_yen
+            + zonos_fee_yen
+            + zonos_duty_yen
+        )
     adjustment_yen = round(total_yen - visible_total)
 
     items: list[dict[str, Any]] = []
@@ -1776,13 +2328,20 @@ def shipping_breakdown_payload(result: ShippingResult, calculated_at: str) -> di
         if round(amount_yen) != 0:
             items.append({"label": label, "amount_yen": round(amount_yen)})
 
-    add_item("日本郵便基本送料" if result.zonos_applied else "基本送料", base_shipping_yen)
-    if result.zonos_applied:
+    add_item("運送料金" if result.cpass_applied else "日本郵便基本送料" if result.zonos_applied else "基本送料", base_shipping_yen)
+    if result.cpass_applied:
+        add_item("輸入通関手数料", cpass_import_clearance_yen)
+        add_item("推定関税および税金", cpass_duty_yen)
+        add_item("燃料割増金", fuel_surcharge_yen)
+        add_item("推定関税処理手数料", cpass_processing_yen)
+        add_item("条件付き追加料金", cpass_conditional_yen)
+    elif result.zonos_applied:
         add_item("Zonos手数料", zonos_fee_yen)
         add_item("関税", zonos_duty_yen)
-    add_item("燃油サーチャージ", fuel_surcharge_yen)
-    add_item("割増料金", surcharge_yen)
-    add_item("追加料金", additional_fee_yen + other_additional_fee_yen)
+    if not result.cpass_applied:
+        add_item("燃油サーチャージ", fuel_surcharge_yen)
+        add_item("割増料金", surcharge_yen)
+        add_item("追加料金", additional_fee_yen + other_additional_fee_yen)
     add_item("その他追加料金", adjustment_yen)
 
     return {
@@ -1794,7 +2353,15 @@ def shipping_breakdown_payload(result: ShippingResult, calculated_at: str) -> di
         "surcharge_yen": round(surcharge_yen),
         "additional_fee_yen": round(additional_fee_yen),
         "other_additional_fee_yen": round(other_additional_fee_yen),
-        "additional_total_yen": round(surcharge_yen + additional_fee_yen + other_additional_fee_yen + adjustment_yen),
+        "additional_total_yen": round(
+            cpass_import_clearance_yen
+            + cpass_duty_yen
+            + cpass_processing_yen
+            + cpass_conditional_yen
+            + adjustment_yen
+            if result.cpass_applied
+            else surcharge_yen + additional_fee_yen + other_additional_fee_yen + adjustment_yen
+        ),
         "total_yen": round(total_yen),
         "actual_weight_g": result.actual_weight_g,
         "volumetric_weight_g": result.volumetric_weight_g,
@@ -1808,8 +2375,43 @@ def shipping_breakdown_payload(result: ShippingResult, calculated_at: str) -> di
         "zonos_applied": result.zonos_applied,
         "zonos_fee_yen": round(zonos_fee_yen),
         "zonos_duty_yen": round(zonos_duty_yen),
+        "cpass_applied": result.cpass_applied,
+        "cpass_published_base_transport_yen": round(
+            float(result.cpass_published_base_transport_yen or 0)
+        ),
+        "cpass_transport_adjustment_rate_percent": (
+            result.cpass_transport_adjustment_rate_percent
+        ),
+        "cpass_import_clearance_fee_yen": round(cpass_import_clearance_yen),
+        "cpass_estimated_duty_tax_yen": round(cpass_duty_yen),
+        "cpass_duty_processing_fee_yen": round(cpass_processing_yen),
+        "cpass_conditional_surcharge_yen": round(cpass_conditional_yen),
+        "cpass_declared_value_foreign": result.cpass_declared_value_foreign,
+        "cpass_declared_currency": result.cpass_declared_currency,
+        "cpass_quantity": result.cpass_quantity,
+        "cpass_hts_code": result.cpass_hts_code,
+        "cpass_incoterm": result.cpass_incoterm,
+        "cpass_fuel_surcharge_rate_percent": result.cpass_fuel_surcharge_rate_percent,
+        "cpass_duty_processing_rate_percent": result.cpass_duty_processing_rate_percent,
+        "cpass_profile_name": result.cpass_profile_name,
+        "cpass_profile_version": result.cpass_profile_version,
+        "cpass_calculated_at": result.cpass_calculated_at,
+        "cpass_conditional_charge_labels": list(result.cpass_conditional_charge_labels),
+        "country_of_origin": result.us_tariff_country_of_origin,
+        "mfn_rate_percent": result.us_tariff_mfn_rate_percent,
+        "us_tariff_estimated_rate_percent": result.us_tariff_estimated_rate_percent,
+        "us_tariff_applied_rate_percent": result.us_tariff_applied_rate_percent,
+        "us_tariff_base_yen": result.us_tariff_base_yen,
+        "us_tariff_amount_yen": result.us_tariff_amount_yen,
+        "us_tariff_rule_name": result.us_tariff_rule_name,
+        "us_tariff_rule_version": result.us_tariff_rule_version,
+        "us_tariff_rule_effective_date": result.us_tariff_rule_effective_date,
+        "us_tariff_rule_applied_date": result.us_tariff_rule_applied_date,
+        "us_tariff_calculated_at": result.us_tariff_calculated_at,
+        "us_tariff_legacy_compatibility": result.us_tariff_legacy_compatibility,
         "source_pdf": result.source_pdf,
         "source_pages": list(result.source_pages),
+        "rate_book_version": result.rate_book_version,
         "effective_from": result.effective_from,
         "effective_to": result.effective_to,
         "calculated_at": calculated_at,
@@ -1871,7 +2473,9 @@ def _register_listing(
         else None
     )
     shipping_breakdown = shipping_breakdown_payload(selected_result, now)
-    shipping_breakdown["destination_country"] = inputs.destination_country
+    shipping_breakdown["destination_country"] = normalize_destination_country(
+        inputs.destination_country
+    )
     shipping_breakdown["currency_code"] = inputs.currency_code
     shipping_breakdown["product_exchange_rate"] = inputs.exchange_rate
     shipping_breakdown["usd_jpy_rate"] = inputs.usd_jpy_rate
@@ -1918,8 +2522,17 @@ def _register_listing(
         "status": STATUS_ACTIVE,
         "sku": inputs.sku.strip(),
         "source_url": inputs.source_url.strip(),
-        "destination_country": inputs.destination_country,
+        "destination_country": normalize_destination_country(inputs.destination_country),
         "destination_postal_code": inputs.postal_code.strip(),
+        "declared_quantity": max(int(inputs.declared_quantity), 1),
+        "declared_unit_price_foreign": inputs.declared_unit_price_foreign,
+        "declared_total_value_foreign": (
+            selected_result.cpass_declared_value_foreign
+            if selected_result.cpass_applied
+            else inputs.declared_total_value_foreign
+        ),
+        "hts_code": inputs.hts_code.strip(),
+        "shipping_incoterm": inputs.shipping_incoterm,
         "sale_price_yen": sale_price_yen,
         "package_weight_g": inputs.weight_g,
         "package_length_cm": inputs.length_cm,
@@ -1957,6 +2570,27 @@ def _register_listing(
         "zonos_total_shipping_yen": selected_result.zonos_total_shipping_yen or 0.0,
         "zonos_config_effective_from": selected_result.zonos_config_effective_from,
         "zonos_config_effective_to": selected_result.zonos_config_effective_to,
+        "country_of_origin": selected_result.us_tariff_country_of_origin,
+        "mfn_rate_percent": selected_result.us_tariff_mfn_rate_percent,
+        "us_tariff_estimated_rate_percent": selected_result.us_tariff_estimated_rate_percent,
+        "us_tariff_applied_rate_percent": selected_result.us_tariff_applied_rate_percent,
+        "us_tariff_base_yen": selected_result.us_tariff_base_yen,
+        "us_tariff_amount_yen": selected_result.us_tariff_amount_yen,
+        "us_tariff_rule_name": selected_result.us_tariff_rule_name,
+        "us_tariff_rule_version": selected_result.us_tariff_rule_version,
+        "us_tariff_rule_effective_date": selected_result.us_tariff_rule_effective_date,
+        "us_tariff_rule_applied_date": selected_result.us_tariff_rule_applied_date,
+        "us_tariff_calculated_at": selected_result.us_tariff_calculated_at,
+        "us_tariff_legacy_compatibility": 1 if selected_result.us_tariff_legacy_compatibility else 0,
+        "cpass_applied": 1 if selected_result.cpass_applied else 0,
+        "cpass_published_base_transport_yen": selected_result.cpass_published_base_transport_yen or 0.0,
+        "cpass_transport_adjustment_rate_percent": selected_result.cpass_transport_adjustment_rate_percent or 0.0,
+        "cpass_import_clearance_fee_yen": selected_result.cpass_import_clearance_fee_yen or 0.0,
+        "cpass_estimated_duty_tax_yen": selected_result.cpass_estimated_duty_tax_yen or 0.0,
+        "cpass_duty_processing_fee_yen": selected_result.cpass_duty_processing_fee_yen or 0.0,
+        "cpass_conditional_surcharge_yen": selected_result.cpass_conditional_surcharge_yen or 0.0,
+        "cpass_profile_version": selected_result.cpass_profile_version,
+        "cpass_calculated_at": selected_result.cpass_calculated_at,
         "registered_at": now,
         "platform_memo": inputs.memo.strip(),
         "created_at": now,
@@ -2097,6 +2731,7 @@ def registration_fingerprint(
     """Identify an identical UI registration without changing the DB schema."""
     shipping_result = dict(selected_result.__dict__)
     shipping_result.pop("zonos_calculated_at", None)
+    shipping_result.pop("us_tariff_calculated_at", None)
     return json.dumps(
         {
             "inputs": inputs.__dict__,
@@ -3208,7 +3843,11 @@ def render_inputs(
     product_col1, product_col2, product_col3, product_col4 = st.columns([1.35, 0.75, 0.8, 0.8])
     product_name = product_col1.text_input("商品名")
     sku = product_col2.text_input("SKU")
-    destination_country = product_col3.selectbox("配送先の国", DEFAULT_COUNTRIES)
+    destination_country = product_col3.selectbox(
+        "配送先の国",
+        DEFAULT_COUNTRIES,
+        format_func=destination_country_label,
+    )
     postal_code = product_col4.text_input("郵便番号", help="米国向けのOrange Connex / FedExゾーン判定に使用します。")
 
     price_col1, price_col2, price_col3 = st.columns(3)
@@ -3234,6 +3873,185 @@ def render_inputs(
         step=10.0,
         format="%.0f",
     )
+
+    country_of_origin = UNSPECIFIED_ORIGIN
+    mfn_rate_percent = 0.0
+    us_tariff_rule_date = date.today().isoformat()
+    eur_jpy_rate = 0.0
+    declared_quantity = 1
+    declared_unit_price_foreign = 0.0
+    declared_total_value_foreign = 0.0
+    hts_code = ""
+    shipping_incoterm = "DDP"
+    if destination_country == UNITED_STATES_COUNTRY:
+        with st.expander("米国向け関税設定", expanded=True):
+            tariff_col1, tariff_col2, tariff_col3 = st.columns(3)
+            origin_options = (UNSPECIFIED_ORIGIN, *supported_origins())
+            country_of_origin = tariff_col1.selectbox(
+                "原産国（COO）",
+                origin_options,
+                index=origin_options.index("Others"),
+                format_func=origin_label,
+                help=(
+                    "新規計算の初期値はOthersです。原産国未指定は、"
+                    "既存データ互換用の旧10%ルールとして扱います。"
+                ),
+            )
+            mfn_rate_percent = tariff_col2.number_input(
+                "MFN税率（%）",
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=0.1,
+                format="%.2f",
+                help="第一段階では日本原産（JP）の適用率判定に使用します。",
+            )
+            selected_rule_date = tariff_col3.date_input(
+                "関税ルール適用日",
+                value=date.today(),
+                help="過去計算を現在ルールで上書きしないため、登録時に保存します。",
+            )
+            us_tariff_rule_date = selected_rule_date.isoformat()
+            tariff_preview = calculate_us_duty_amount(
+                country_of_origin=country_of_origin,
+                mfn_rate_percent=mfn_rate_percent,
+                product_price=sale_price_usd,
+                exchange_rate=exchange_rate,
+                rule_date=selected_rule_date,
+            )
+            preview_col1, preview_col2, preview_col3 = st.columns(3)
+            preview_col1.metric(
+                "原産国別見積比率",
+                f"{tariff_preview.rate.estimated_rate_percent:.2f}%"
+                if tariff_preview.rate.estimated_rate_percent is not None
+                else "旧ルール",
+            )
+            preview_col2.metric(
+                "適用関税率",
+                f"{tariff_preview.rate.applied_rate_percent:.2f}%",
+            )
+            preview_col3.metric(
+                "推定関税額",
+                compact_yen(tariff_preview.duty_amount_yen),
+            )
+            if tariff_preview.rate.legacy_compatibility:
+                st.warning(
+                    "原産国未指定または新ルール適用日前のため、旧10%ルール互換で計算します。"
+                )
+            elif country_of_origin == "JP":
+                st.caption(
+                    "日本原産は max（MFN税率, 12.5%）で適用関税率を決定します。"
+                )
+            else:
+                st.caption(
+                    "第一段階では、原産国別のSpeedPAK推定関税・税金見積比率を使用します。"
+                )
+
+            st.markdown("#### cPass / SpeedPAK Economy 申告情報")
+            declaration_col1, declaration_col2, declaration_col3, declaration_col4 = st.columns(4)
+            declared_quantity = int(
+                declaration_col1.number_input(
+                    "数量",
+                    min_value=1,
+                    value=1,
+                    step=1,
+                    help="cPassへ申告する商品の合計数量です。",
+                )
+            )
+            declared_unit_price_foreign = declaration_col2.number_input(
+                f"1個あたり申告価格（{currency_code}）",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                format="%.2f",
+                help="0の場合は販売価格を申告総価格として使用します。",
+            )
+            declared_total_value_foreign = declaration_col3.number_input(
+                f"申告総価格（{currency_code}）",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                format="%.2f",
+                help="入力した値を優先します。0の場合は単価×数量、さらに未入力なら販売価格を使用します。",
+            )
+            shipping_incoterm = declaration_col4.selectbox(
+                "インコタームズ",
+                ("DDP",),
+                format_func=lambda value: "DDP - Delivered Duty Paid" if value == "DDP" else value,
+            )
+            hts_code = st.text_input(
+                "HTS / HSコード",
+                help=(
+                    "登録スナップショットへ保存します。添付PDFにHTS別税率表がないため、"
+                    "現段階では自動税率検索には使用しません。"
+                ),
+            )
+            effective_declaration = effective_declared_value(
+                sale_price_usd,
+                declared_unit_price_foreign,
+                declared_quantity,
+                declared_total_value_foreign,
+            )
+            st.caption(
+                f"今回のcPass関税計算に使用する申告総価格: "
+                f"{currency_amount(effective_declaration, currency_code)}"
+            )
+
+    if destination_country in EU27_COUNTRY_CODES:
+        with st.expander("EU向け商品価値上限（150 EUR）", expanded=True):
+            if "eur_jpy_reference_rate" not in st.session_state:
+                try:
+                    reference = fetch_eur_jpy_reference_rate()
+                    st.session_state.eur_jpy_reference_rate = float(reference["rate"])
+                    st.session_state.eur_jpy_reference_source = str(reference["source"])
+                    st.session_state.eur_jpy_reference_updated_at = str(
+                        reference.get("api_updated_at") or ""
+                    )
+                except (RuntimeError, ValueError, urllib.error.URLError, TimeoutError, OSError):
+                    st.session_state.eur_jpy_reference_rate = 0.0
+                    st.session_state.eur_jpy_reference_source = "取得失敗"
+                    st.session_state.eur_jpy_reference_updated_at = ""
+
+            eur_col1, eur_col2 = st.columns([1, 1])
+            pending_eur_rate = st.session_state.pop("pending_eur_jpy_rate", None)
+            if pending_eur_rate is not None:
+                st.session_state.input_eur_jpy_rate = float(pending_eur_rate)
+            elif "input_eur_jpy_rate" not in st.session_state:
+                st.session_state.input_eur_jpy_rate = float(
+                    st.session_state.get("eur_jpy_reference_rate", 0.0)
+                )
+            eur_jpy_rate = eur_col1.number_input(
+                "商品価値判定用 EUR/JPYレート",
+                min_value=0.0,
+                step=0.1,
+                format="%.4f",
+                key="input_eur_jpy_rate",
+            )
+            if eur_col2.button("EUR/JPY最新レートに更新", use_container_width=True):
+                try:
+                    fetch_eur_jpy_reference_rate.clear()
+                    reference = fetch_eur_jpy_reference_rate()
+                    st.session_state.eur_jpy_reference_rate = float(reference["rate"])
+                    st.session_state.eur_jpy_reference_source = str(reference["source"])
+                    st.session_state.eur_jpy_reference_updated_at = str(
+                        reference.get("api_updated_at") or ""
+                    )
+                    st.session_state.pending_eur_jpy_rate = float(reference["rate"])
+                    st.rerun()
+                except (RuntimeError, ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+                    st.warning(f"EUR/JPYレートを取得できませんでした: {exc}")
+
+            if eur_jpy_rate > 0:
+                product_value_eur = sale_price_usd * exchange_rate / eur_jpy_rate
+                st.caption(
+                    f"商品価格換算: {product_value_eur:,.2f} EUR / 上限 150 EUR | "
+                    f"取得元: {st.session_state.get('eur_jpy_reference_source', '手動入力')} | "
+                    f"API更新日時: {st.session_state.get('eur_jpy_reference_updated_at') or '-'}"
+                )
+            else:
+                st.warning(
+                    "EUR/JPYレートが未入力のため、150 EURの商品価値上限は警告のみとなります。"
+                )
 
     size_col1, size_col2, size_col3 = st.columns(3)
     length_cm = size_col1.number_input("長さ（cm）", min_value=0.0, value=0.0, step=1.0, format="%.1f")
@@ -3298,6 +4116,15 @@ def render_inputs(
         memo=memo,
         currency_code=currency_code,
         usd_jpy_rate=usd_jpy_rate,
+        country_of_origin=country_of_origin,
+        mfn_rate_percent=mfn_rate_percent,
+        us_tariff_rule_date=us_tariff_rule_date,
+        eur_jpy_rate=eur_jpy_rate,
+        declared_quantity=declared_quantity,
+        declared_unit_price_foreign=declared_unit_price_foreign,
+        declared_total_value_foreign=declared_total_value_foreign,
+        hts_code=hts_code,
+        shipping_incoterm=shipping_incoterm,
     )
 
 
@@ -3722,11 +4549,12 @@ def render_zonos_settings() -> None:
         duty = dict(config.get("duty") or {})
         fee = dict(config.get("fee") or {})
         col1, col2, col3 = st.columns(3)
-        duty_rate = col1.number_input("関税率(%)", min_value=0.0, max_value=99.0, value=float(duty.get("rate_percent", 10.0)), step=0.1, format="%.2f")
+        duty_rate = col1.number_input("旧ルール互換関税率(%)", min_value=0.0, max_value=99.0, value=float(duty.get("rate_percent", 10.0)), step=0.1, format="%.2f")
         duty_base = col2.selectbox(
-            "関税対象",
+            "旧ルール関税対象（参照のみ）",
             ("product_price_yen", "product_price_yen_plus_shipping"),
             index=0 if str(duty.get("base", "product_price_yen")) == "product_price_yen" else 1,
+            disabled=True,
         )
         fee_base = col3.selectbox(
             "Zonos手数料基準",
@@ -3742,6 +4570,7 @@ def render_zonos_settings() -> None:
             height=220,
         )
         st.caption("20,000円超は現在登録されている最終手数料率を使用します。")
+        st.caption("この関税率は原産国未指定または2026-07-29より前の計算にだけ使用します。新ルールの原産国別比率は us_tariff_rules.json で管理します。")
         if st.button("Zonos設定を保存"):
             try:
                 points = json.loads(points_text)

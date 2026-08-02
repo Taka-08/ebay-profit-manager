@@ -55,6 +55,10 @@ class ProfitDefaultTest(unittest.TestCase):
                 "広告率",
             ).value,
         )
+        self.assertEqual(
+            "Others",
+            self.element_with_label(app.selectbox, "原産国（COO）").value,
+        )
 
     def test_small_packet_is_excluded_without_removing_other_japan_post_services(
         self,
@@ -96,6 +100,49 @@ class ProfitDefaultTest(unittest.TestCase):
             {"EMS", "国際エアパケット", "国際小包"}.issubset(
                 japan_post_services
             )
+        )
+
+    def test_japan_post_zonos_uses_versioned_us_tariff_engine(self) -> None:
+        inputs = profit_app.ProductInputs(
+            product_name="新関税テスト",
+            sku="",
+            sale_price_usd=100.0,
+            buyer_shipping_usd=0.0,
+            purchase_price_yen=3000.0,
+            domestic_shipping_yen=20.0,
+            packaging_yen=0.0,
+            destination_country="アメリカ",
+            weight_g=500.0,
+            length_cm=0.0,
+            width_cm=0.0,
+            height_cm=0.0,
+            ebay_fee_rate=17.5,
+            overseas_fee_rate=2.0,
+            ad_rate=0.0,
+            other_fee_yen=0.0,
+            fixed_fee_usd=0.3,
+            target_profit_yen=0.0,
+            product_url="",
+            source_url="",
+            exchange_rate=100.0,
+            postal_code="10001",
+            country_of_origin="JP",
+            mfn_rate_percent=16.5,
+            us_tariff_rule_date="2026-07-29",
+        )
+
+        ems = next(
+            result
+            for result in profit_app.calculate_shipping_results(inputs)
+            if result.carrier == "日本郵便" and result.service == "EMS"
+        )
+        self.assertTrue(ems.zonos_applied)
+        self.assertEqual(16.5, ems.zonos_duty_rate_percent)
+        self.assertEqual(1650.0, ems.zonos_duty_yen)
+        self.assertEqual("JP", ems.us_tariff_country_of_origin)
+        self.assertEqual(
+            "speedpak-us-estimated-2026-07-29",
+            ems.us_tariff_rule_version,
         )
 
 

@@ -71,5 +71,5 @@
       }
     ]
   },
-  "note": "US-bound Japan Post shipments use Zonos Prepay with Section 122 duty."
+  "note": "US-bound Japan Post shipments use Zonos Prepay with the versioned U.S. tariff engine."
 }

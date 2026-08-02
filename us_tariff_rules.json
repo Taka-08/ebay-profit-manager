@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "legacy_rule": {
+    "name": "Legacy Zonos Section 122 compatibility",
+    "version": "legacy-zonos-section-122-10",
+    "rate_percent": 10.0,
+    "taxable_base": "product_price_jpy",
+    "additional_duties": [],
+    "exemptions": [],
+    "special_tariffs": []
+  },
+  "origins": {
+    "JP": "Japan (JP)",
+    "EU": "European Union (EU)",
+    "MY": "Malaysia (MY)",
+    "TW": "Taiwan (TW)",
+    "VN": "Vietnam (VN)",
+    "KR": "South Korea (KR)",
+    "CH": "Switzerland (CH)",
+    "GB": "United Kingdom (GB)",
+    "TH": "Thailand (TH)",
+    "US": "United States (US)",
+    "CN": "Chinese Mainland (CN)",
+    "HK": "Hong Kong (HK)",
+    "Others": "Others"
+  },
+  "rules": [
+    {
+      "name": "SpeedPAK Estimated U.S. Duty & Tax ratio",
+      "version": "speedpak-us-estimated-2026-07-29",
+      "effective_from": "2026-07-29",
+      "effective_to": "",
+      "taxable_base": "product_price_jpy",
+      "origin_rates_percent": {
+        "JP": 12.5,
+        "EU": 10.0,
+        "MY": 10.0,
+        "TW": 10.0,
+        "VN": 12.5,
+        "KR": 12.5,
+        "CH": 12.5,
+        "GB": 10.0,
+        "TH": 12.5,
+        "US": 0.0,
+        "Others": 10.0,
+        "CN": 30.0,
+        "HK": 15.0
+      },
+      "origin_rules": {
+        "JP": "max_mfn_or_estimated_ratio",
+        "default": "estimated_ratio"
+      },
+      "additional_duties": [],
+      "exemptions": [],
+      "special_tariffs": []
+    }
+  ]
+}
