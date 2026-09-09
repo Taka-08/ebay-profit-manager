@@ -9,6 +9,8 @@ from uuid import uuid4
 ENTITY_ID_PREFIXES = MappingProxyType(
     {
         "product": "prd",
+        "product_source": "src",
+        "product_image": "img",
         "inventory_item": "inv",
         "profit_calculation": "pft",
         "shipping_quote": "shq",
@@ -47,3 +49,11 @@ def generate_event_id() -> str:
 
 def generate_audit_id() -> str:
     return generate_entity_id("audit")
+
+
+def generate_source_id() -> str:
+    return generate_entity_id("product_source")
+
+
+def generate_image_id() -> str:
+    return generate_entity_id("product_image")

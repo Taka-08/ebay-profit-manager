@@ -7,7 +7,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .ids import generate_audit_id, generate_event_id, generate_product_id
+from .ids import (
+    generate_audit_id,
+    generate_event_id,
+    generate_image_id,
+    generate_product_id,
+    generate_source_id,
+)
 from .migrations import utc_now
 
 
@@ -47,6 +53,22 @@ class ProductRepository:
         platform: str,
         sku: str = "",
         status: str = "active",
+        jan: str = "",
+        ean: str = "",
+        upc: str = "",
+        brand: str = "",
+        model_number: str = "",
+        category: str = "",
+        notes: str = "",
+        country_of_origin: str = "",
+        hs_code: str = "",
+        hts_code: str = "",
+        weight_g: float = 0,
+        length_cm: float = 0,
+        width_cm: float = 0,
+        height_cm: float = 0,
+        purchase_price: float = 0,
+        purchase_currency: str = "JPY",
         product_id: str | None = None,
         timestamp: str | None = None,
     ) -> str:
@@ -56,8 +78,12 @@ class ProductRepository:
             """
             INSERT INTO products (
                 product_id, product_name, platform, sku,
-                created_at, updated_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, status,
+                jan, ean, upc, brand, model_number, category, notes,
+                country_of_origin, hs_code, hts_code,
+                weight_g, length_cm, width_cm, height_cm,
+                purchase_price, purchase_currency
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 resolved_id,
@@ -67,6 +93,22 @@ class ProductRepository:
                 created_at,
                 created_at,
                 status,
+                jan,
+                ean,
+                upc,
+                brand,
+                model_number,
+                category,
+                notes,
+                country_of_origin,
+                hs_code,
+                hts_code,
+                weight_g,
+                length_cm,
+                width_cm,
+                height_cm,
+                purchase_price,
+                purchase_currency,
             ),
         )
         return resolved_id
@@ -77,6 +119,243 @@ class ProductRepository:
             (product_id,),
         ).fetchone()
         return None if row is None else dict(row)
+
+    def update(self, product_id: str, values: dict[str, Any]) -> None:
+        allowed = {
+            "product_name", "platform", "sku", "status", "jan", "ean", "upc",
+            "brand", "model_number", "category", "notes", "country_of_origin",
+            "hs_code", "hts_code", "weight_g", "length_cm", "width_cm",
+            "height_cm", "purchase_price", "purchase_currency", "updated_at",
+        }
+        invalid = set(values) - allowed
+        if invalid:
+            raise ValueError(f"Unsupported product column: {sorted(invalid)[0]}")
+        columns = _checked_columns(values)
+        assignments = ", ".join(f"{column} = ?" for column in columns)
+        self.connection.execute(
+            f"UPDATE products SET {assignments} WHERE product_id = ?",
+            (*[values[column] for column in columns], product_id),
+        )
+
+    def list(
+        self,
+        *,
+        search: str = "",
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        parameters: list[Any] = []
+        if search.strip():
+            like = f"%{search.strip()}%"
+            where.append(
+                "(product_name LIKE ? OR sku LIKE ? OR jan LIKE ? OR ean LIKE ? "
+                "OR upc LIKE ? OR brand LIKE ? OR model_number LIKE ?)"
+            )
+            parameters.extend([like] * 7)
+        if status and status != "ALL":
+            where.append("UPPER(status) = ?")
+            parameters.append(status.upper())
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM products{clause} ORDER BY updated_at DESC, product_id LIMIT ?",
+            (*parameters, max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def duplicate_candidates(
+        self,
+        *,
+        sku: str = "",
+        jan: str = "",
+        ean: str = "",
+        upc: str = "",
+        brand: str = "",
+        model_number: str = "",
+        exclude_product_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        for column, raw in (("sku", sku), ("jan", jan), ("ean", ean), ("upc", upc)):
+            value = raw.strip()
+            if value:
+                conditions.append(f"{column} = ?")
+                parameters.append(value)
+        if brand.strip() and model_number.strip():
+            conditions.append("(brand = ? AND model_number = ?)")
+            parameters.extend((brand.strip(), model_number.strip()))
+        if not conditions:
+            return []
+        clause = f"({' OR '.join(conditions)})"
+        if exclude_product_id:
+            clause += " AND product_id <> ?"
+            parameters.append(exclude_product_id)
+        rows = self.connection.execute(
+            f"SELECT product_id, product_name, sku, brand, model_number "
+            f"FROM products WHERE {clause} ORDER BY updated_at DESC",
+            tuple(parameters),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_linked_listings(self, product_id: str) -> list[dict[str, Any]]:
+        table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'listings'"
+        ).fetchone()
+        if table is None:
+            return []
+        columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(listings)")
+        }
+        if "product_id" not in columns:
+            return []
+        selected = ["id", "product_id"]
+        for column in ("product_name", "platform", "status", "listing_date"):
+            if column in columns:
+                selected.append(column)
+        rows = self.connection.execute(
+            f"SELECT {', '.join(selected)} FROM listings "
+            "WHERE product_id = ? ORDER BY id DESC",
+            (product_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+class ProductSourceRepository:
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    def create(self, *, product_id: str, values: dict[str, Any]) -> str:
+        timestamp = str(values.get("timestamp") or utc_now())
+        source_id = str(values.get("source_id") or generate_source_id())
+        is_primary = 1 if values.get("is_primary") else 0
+        if is_primary:
+            self.connection.execute(
+                "UPDATE product_sources SET is_primary = 0, updated_at = ? WHERE product_id = ?",
+                (timestamp, product_id),
+            )
+        self.connection.execute(
+            """
+            INSERT INTO product_sources (
+                source_id, product_id, source_type, source_name, source_url,
+                source_item_id, price, currency, stock_status, is_primary,
+                last_checked_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id, product_id, values["source_type"], values.get("source_name", ""),
+                values.get("source_url", ""), values.get("source_item_id", ""),
+                values.get("price", 0), values.get("currency", "JPY"),
+                values.get("stock_status", "UNKNOWN"), is_primary,
+                values.get("last_checked_at"), timestamp, timestamp,
+            ),
+        )
+        return source_id
+
+    def get(self, source_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM product_sources WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def list_for_product(self, product_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM product_sources WHERE product_id = ? "
+            "ORDER BY is_primary DESC, updated_at DESC, source_id",
+            (product_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update(self, source_id: str, *, product_id: str, values: dict[str, Any]) -> None:
+        allowed = {
+            "source_type", "source_name", "source_url", "source_item_id", "price",
+            "currency", "stock_status", "is_primary", "last_checked_at", "updated_at",
+        }
+        invalid = set(values) - allowed
+        if invalid:
+            raise ValueError(f"Unsupported source column: {sorted(invalid)[0]}")
+        if values.get("is_primary"):
+            self.connection.execute(
+                "UPDATE product_sources SET is_primary = 0, updated_at = ? "
+                "WHERE product_id = ? AND source_id <> ?",
+                (values.get("updated_at") or utc_now(), product_id, source_id),
+            )
+        columns = _checked_columns(values)
+        assignments = ", ".join(f"{column} = ?" for column in columns)
+        self.connection.execute(
+            f"UPDATE product_sources SET {assignments} "
+            "WHERE source_id = ? AND product_id = ?",
+            (*[values[column] for column in columns], source_id, product_id),
+        )
+
+
+class InventoryRepository:
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    def get(self, product_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM inventory WHERE product_id = ?", (product_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def upsert(self, *, product_id: str, values: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO inventory (
+                product_id, stock_mode, on_hand_quantity, reserved_quantity,
+                reorder_point, storage_location, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                stock_mode = excluded.stock_mode,
+                on_hand_quantity = excluded.on_hand_quantity,
+                reserved_quantity = excluded.reserved_quantity,
+                reorder_point = excluded.reorder_point,
+                storage_location = excluded.storage_location,
+                updated_at = excluded.updated_at
+            """,
+            (
+                product_id, values["stock_mode"], values["on_hand_quantity"],
+                values["reserved_quantity"], values["reorder_point"],
+                values.get("storage_location", ""), values.get("updated_at") or utc_now(),
+            ),
+        )
+
+
+class ProductImageRepository:
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    def create(self, *, product_id: str, values: dict[str, Any]) -> str:
+        image_id = str(values.get("image_id") or generate_image_id())
+        is_primary = 1 if values.get("is_primary") else 0
+        if is_primary:
+            self.connection.execute(
+                "UPDATE product_images SET is_primary = 0 WHERE product_id = ?",
+                (product_id,),
+            )
+        self.connection.execute(
+            """
+            INSERT INTO product_images (
+                image_id, product_id, storage_provider, storage_key, url,
+                file_name, sort_order, is_primary, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                image_id, product_id, values.get("storage_provider", "external"),
+                values.get("storage_key", ""), values.get("url", ""),
+                values.get("file_name", ""), values.get("sort_order", 0),
+                is_primary, values.get("created_at") or utc_now(),
+            ),
+        )
+        return image_id
+
+    def list_for_product(self, product_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM product_images WHERE product_id = ? "
+            "ORDER BY is_primary DESC, sort_order, created_at, image_id",
+            (product_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 class ListingRepository:

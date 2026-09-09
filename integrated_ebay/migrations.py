@@ -19,7 +19,7 @@ class Migration:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _table_exists(connection: Any, table_name: str) -> bool:
@@ -109,7 +109,130 @@ FOUNDATION_MIGRATION = Migration(
     apply=_create_foundation_tables,
 )
 
-MIGRATIONS = (FOUNDATION_MIGRATION,)
+
+PRODUCT_CATALOG_COLUMNS = {
+    "jan": "TEXT NOT NULL DEFAULT ''",
+    "ean": "TEXT NOT NULL DEFAULT ''",
+    "upc": "TEXT NOT NULL DEFAULT ''",
+    "brand": "TEXT NOT NULL DEFAULT ''",
+    "model_number": "TEXT NOT NULL DEFAULT ''",
+    "category": "TEXT NOT NULL DEFAULT ''",
+    "notes": "TEXT NOT NULL DEFAULT ''",
+    "country_of_origin": "TEXT NOT NULL DEFAULT ''",
+    "hs_code": "TEXT NOT NULL DEFAULT ''",
+    "hts_code": "TEXT NOT NULL DEFAULT ''",
+    "weight_g": "REAL NOT NULL DEFAULT 0",
+    "length_cm": "REAL NOT NULL DEFAULT 0",
+    "width_cm": "REAL NOT NULL DEFAULT 0",
+    "height_cm": "REAL NOT NULL DEFAULT 0",
+    "purchase_price": "REAL NOT NULL DEFAULT 0",
+    "purchase_currency": "TEXT NOT NULL DEFAULT 'JPY'",
+}
+
+
+def _create_product_catalog_tables(connection: Any) -> None:
+    existing = _table_columns(connection, "products")
+    for column, definition in PRODUCT_CATALOG_COLUMNS.items():
+        if column not in existing:
+            connection.execute(
+                f"ALTER TABLE products ADD COLUMN {column} {definition}"
+            )
+
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_identifiers "
+        "ON products(jan, ean, upc)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_brand_model "
+        "ON products(brand, model_number)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_sources (
+            source_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_name TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            source_item_id TEXT NOT NULL DEFAULT '',
+            price REAL NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'JPY',
+            stock_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            last_checked_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(product_id) REFERENCES products(product_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_sources_product "
+        "ON product_sources(product_id, updated_at)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_product_sources_primary "
+        "ON product_sources(product_id) WHERE is_primary = 1"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory (
+            product_id TEXT PRIMARY KEY,
+            stock_mode TEXT NOT NULL DEFAULT 'IN_STOCK',
+            on_hand_quantity INTEGER NOT NULL DEFAULT 0,
+            reserved_quantity INTEGER NOT NULL DEFAULT 0,
+            reorder_point INTEGER NOT NULL DEFAULT 0,
+            storage_location TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(product_id) REFERENCES products(product_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inventory_mode "
+        "ON inventory(stock_mode, updated_at)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_images (
+            image_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            storage_provider TEXT NOT NULL DEFAULT 'external',
+            storage_key TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            file_name TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(product_id) REFERENCES products(product_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_images_product "
+        "ON product_images(product_id, sort_order, created_at)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_product_images_primary "
+        "ON product_images(product_id) WHERE is_primary = 1"
+    )
+
+
+PRODUCT_CATALOG_MIGRATION = Migration(
+    migration_id="0002_product_catalog_inventory",
+    description=(
+        "Extend products and create product sources, inventory, and image metadata"
+    ),
+    apply=_create_product_catalog_tables,
+)
+
+MIGRATIONS = (FOUNDATION_MIGRATION, PRODUCT_CATALOG_MIGRATION)
 
 
 def _ensure_migration_table(connection: Any) -> None:

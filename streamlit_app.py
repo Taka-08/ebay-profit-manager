@@ -48,7 +48,7 @@ from destination_countries import (
     normalize_destination_country,
 )
 from integrated_ebay.migrations import run_schema_migrations
-from integrated_ebay.services import ListingRegistrationService
+from integrated_ebay.services import ListingRegistrationService, ProductCatalogService
 from platform_config import (
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -136,6 +136,7 @@ class ProductInputs:
     declared_total_value_foreign: float = 0.0
     hts_code: str = ""
     shipping_incoterm: str = "DDP"
+    product_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,7 @@ class SimpleProfitInputs:
     parts_cost_yen: float
     other_cost_yen: float
     memo: str
+    product_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2607,6 +2609,7 @@ def _register_listing(
             product_name=inputs.product_name,
             platform=PLATFORM_EBAY,
             sku=inputs.sku,
+            product_id=inputs.product_id,
             audit_metadata={
                 "source": "profit_calculator",
                 "registration_mode": "shipping_result",
@@ -2975,6 +2978,7 @@ def register_simple_listing(
             listing_data=data,
             product_name=inputs.product_name,
             platform=inputs.platform,
+            product_id=inputs.product_id,
             audit_metadata={
                 "source": "profit_calculator",
                 "registration_mode": "simple_profit",
@@ -3858,8 +3862,8 @@ def render_inputs(
         st.rerun()
 
     product_col1, product_col2, product_col3, product_col4 = st.columns([1.35, 0.75, 0.8, 0.8])
-    product_name = product_col1.text_input("商品名")
-    sku = product_col2.text_input("SKU")
+    product_name = product_col1.text_input("商品名", key="input_product_name")
+    sku = product_col2.text_input("SKU", key="input_sku")
     destination_country = product_col3.selectbox(
         "配送先の国",
         DEFAULT_COUNTRIES,
@@ -3879,16 +3883,16 @@ def render_inputs(
     purchase_price_yen = price_col2.number_input(
         "仕入れ価格（円）",
         min_value=0.0,
-        value=0.0,
         step=100.0,
         format="%.0f",
+        key="input_purchase_price_yen",
     )
     weight_g = price_col3.number_input(
         "実重量（g）",
         min_value=0.0,
-        value=0.0,
         step=10.0,
         format="%.0f",
+        key="input_weight_g",
     )
 
     country_of_origin = UNSPECIFIED_ORIGIN
@@ -3904,15 +3908,19 @@ def render_inputs(
         with st.expander("米国向け関税設定", expanded=True):
             tariff_col1, tariff_col2, tariff_col3 = st.columns(3)
             origin_options = (UNSPECIFIED_ORIGIN, *supported_origins())
+            origin_select_kwargs = {}
+            if "input_country_of_origin" not in st.session_state:
+                origin_select_kwargs["index"] = origin_options.index("Others")
             country_of_origin = tariff_col1.selectbox(
                 "原産国（COO）",
                 origin_options,
-                index=origin_options.index("Others"),
                 format_func=origin_label,
                 help=(
                     "新規計算の初期値はOthersです。原産国未指定は、"
                     "既存データ互換用の旧10%ルールとして扱います。"
                 ),
+                key="input_country_of_origin",
+                **origin_select_kwargs,
             )
             mfn_rate_percent = tariff_col2.number_input(
                 "MFN税率（%）",
@@ -4002,6 +4010,7 @@ def render_inputs(
                     "登録スナップショットへ保存します。添付PDFにHTS別税率表がないため、"
                     "現段階では自動税率検索には使用しません。"
                 ),
+                key="input_hts_code",
             )
             effective_declaration = effective_declared_value(
                 sale_price_usd,
@@ -4071,9 +4080,9 @@ def render_inputs(
                 )
 
     size_col1, size_col2, size_col3 = st.columns(3)
-    length_cm = size_col1.number_input("長さ（cm）", min_value=0.0, value=0.0, step=1.0, format="%.1f")
-    width_cm = size_col2.number_input("幅（cm）", min_value=0.0, value=0.0, step=1.0, format="%.1f")
-    height_cm = size_col3.number_input("高さ（cm）", min_value=0.0, value=0.0, step=1.0, format="%.1f")
+    length_cm = size_col1.number_input("長さ（cm）", min_value=0.0, step=1.0, format="%.1f", key="input_length_cm")
+    width_cm = size_col2.number_input("幅（cm）", min_value=0.0, step=1.0, format="%.1f", key="input_width_cm")
+    height_cm = size_col3.number_input("高さ（cm）", min_value=0.0, step=1.0, format="%.1f", key="input_height_cm")
 
     fee_col1, fee_col2, fee_col3, fee_col4 = st.columns(4)
     ebay_fee_rate = fee_col1.number_input("eBay手数料率", min_value=0.0, max_value=99.0, value=DEFAULT_EBAY_FEE_RATE, step=0.1, format="%.2f", key="input_ebay_fee_rate", help="カテゴリー手数料はこの率に含めて入力してください。")
@@ -4099,12 +4108,13 @@ def render_inputs(
 
     with st.expander("URLなど登録用の補足情報", expanded=False):
         url_col1, url_col2 = st.columns(2)
-        source_url = url_col1.text_input("仕入れ先URL")
+        source_url = url_col1.text_input("仕入れ先URL", key="input_source_url")
         product_url = url_col2.text_input("商品URL")
         memo = st.text_area(
             "メモ",
             height=80,
             help="出品管理ツールへ登録する補足情報です。",
+            key="input_product_memo",
         )
 
     return ProductInputs(
@@ -4142,6 +4152,7 @@ def render_inputs(
         declared_total_value_foreign=declared_total_value_foreign,
         hts_code=hts_code,
         shipping_incoterm=shipping_incoterm,
+        product_id=st.session_state.get("selected_product_master_id"),
     )
 
 
@@ -4354,6 +4365,7 @@ def render_simple_profit_calculator(platform: str) -> None:
         parts_cost_yen=parts_cost_yen,
         other_cost_yen=other_cost_yen,
         memo=memo,
+        product_id=st.session_state.get("selected_product_master_id"),
     )
     result = calculate_simple_profit(
         platform=inputs.platform,
@@ -4616,8 +4628,85 @@ def render_zonos_settings() -> None:
                 st.error(f"Zonos設定を保存できませんでした: {exc}")
 
 
+def apply_product_master_prefill() -> None:
+    """Load one product master record before rendering any input widgets."""
+    try:
+        product_id = str(st.query_params.get("product_id") or "").strip()
+    except Exception:
+        return
+    if not product_id or st.session_state.get("loaded_product_master_id") == product_id:
+        return
+    init_listing_db()
+    product = ProductCatalogService(get_connection).get_product(product_id)
+    if product is None:
+        st.warning(f"指定された商品マスターが見つかりません: {product_id}")
+        return
+
+    platform = str(product.get("platform") or PLATFORM_EBAY)
+    if platform not in PLATFORM_OPTIONS:
+        platform = PLATFORM_EBAY
+    st.session_state.profit_platform = platform
+    st.session_state.selected_product_master_id = product_id
+    st.session_state.loaded_product_master_id = product_id
+    st.session_state.product_master_notice = (
+        f"商品マスター「{product.get('product_name', '')}」を読み込みました。"
+    )
+
+    purchase_currency = str(product.get("purchase_currency") or "JPY").upper()
+    purchase_price = float(product.get("purchase_price") or 0)
+    if platform == PLATFORM_EBAY:
+        st.session_state.input_product_name = str(product.get("product_name") or "")
+        st.session_state.input_sku = str(product.get("sku") or "")
+        st.session_state.input_weight_g = float(product.get("weight_g") or 0)
+        st.session_state.input_length_cm = float(product.get("length_cm") or 0)
+        st.session_state.input_width_cm = float(product.get("width_cm") or 0)
+        st.session_state.input_height_cm = float(product.get("height_cm") or 0)
+        st.session_state.input_source_url = str(
+            next(
+                (
+                    source.get("source_url")
+                    for source in product.get("sources", [])
+                    if source.get("is_primary") and source.get("source_url")
+                ),
+                "",
+            )
+        )
+        st.session_state.input_product_memo = str(product.get("notes") or "")
+        origin = str(product.get("country_of_origin") or "")
+        if origin in (UNSPECIFIED_ORIGIN, *supported_origins()):
+            st.session_state.input_country_of_origin = origin
+        st.session_state.input_hts_code = str(
+            product.get("hts_code") or product.get("hs_code") or ""
+        )
+        if purchase_currency == "JPY":
+            st.session_state.input_purchase_price_yen = purchase_price
+        elif purchase_price:
+            st.session_state.product_master_currency_notice = (
+                f"仕入価格は{purchase_currency}建てのため、円換算値は自動入力していません。"
+            )
+    else:
+        key_prefix = "mercari" if platform == PLATFORM_MERCARI else "iphone"
+        st.session_state[f"{key_prefix}_product_name"] = str(
+            product.get("product_name") or ""
+        )
+        st.session_state[f"{key_prefix}_memo"] = str(product.get("notes") or "")
+        if purchase_currency == "JPY":
+            st.session_state[f"{key_prefix}_purchase_price_yen"] = f"{purchase_price:,.0f}"
+        elif purchase_price:
+            st.session_state.product_master_currency_notice = (
+                f"仕入価格は{purchase_currency}建てのため、円換算値は自動入力していません。"
+            )
+
+
 def main() -> None:
     render_header()
+    apply_product_master_prefill()
+    notice = st.session_state.pop("product_master_notice", None)
+    if notice:
+        st.success(notice)
+    currency_notice = st.session_state.pop("product_master_currency_notice", None)
+    if currency_notice:
+        st.info(currency_notice)
     platform = render_platform_selector()
     if platform != PLATFORM_EBAY:
         render_simple_profit_calculator(platform)
