@@ -47,6 +47,8 @@ from destination_countries import (
     destination_country_label,
     normalize_destination_country,
 )
+from integrated_ebay.migrations import run_schema_migrations
+from integrated_ebay.services import ListingRegistrationService
 from platform_config import (
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -239,6 +241,7 @@ class RegistrationOutcome:
     total_count: int
     database_path: str
     product_name: str
+    product_id: str | None = None
 
 
 def yen(value: float | int | None) -> str:
@@ -1070,6 +1073,7 @@ def init_listing_db() -> None:
             "UPDATE listings SET platform = ? WHERE platform = ?",
             (PLATFORM_IPHONE_RESALE, "その他"),
         )
+    run_schema_migrations(get_connection)
 
 
 def ceil_to_unit(value: float, unit: float) -> float:
@@ -2596,20 +2600,20 @@ def _register_listing(
         "created_at": now,
         "updated_at": now,
     }
-    columns = list(data.keys())
-    placeholders = ", ".join("?" for _ in columns)
-    column_list = ", ".join(columns)
-
     database_path = database_location_label(LISTING_DB_PATH)
     try:
-        with get_connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                f"INSERT INTO listings ({column_list}) VALUES ({placeholders})",
-                tuple(data[column] for column in columns),
-            )
-            listing_id = int(cursor.lastrowid)
-            connection.commit()
+        registration = ListingRegistrationService(get_connection).register(
+            listing_data=data,
+            product_name=inputs.product_name,
+            platform=PLATFORM_EBAY,
+            sku=inputs.sku,
+            audit_metadata={
+                "source": "profit_calculator",
+                "registration_mode": "shipping_result",
+            },
+        )
+        listing_id = registration.listing_id
+        product_id = registration.product_id
 
         with get_connection() as verification_connection:
             saved_row = verification_connection.execute(
@@ -2617,7 +2621,7 @@ def _register_listing(
                 SELECT id, product_name, expected_shipping_carrier,
                        expected_shipping_service, planned_shipping_yen,
                        expected_profit_yen, currency_code, exchange_rate,
-                       usd_jpy_rate, created_at
+                       usd_jpy_rate, created_at, product_id
                 FROM listings
                 WHERE id = ?
                 """,
@@ -2640,9 +2644,14 @@ def _register_listing(
             raise RuntimeError(
                 f"保存確認時の販売通貨が一致しません。ID: {listing_id}"
             )
+        if str(saved_row["product_id"]) != product_id:
+            raise RuntimeError(
+                f"保存確認時の商品IDが一致しません。ID: {listing_id}"
+            )
 
         event_details = {
             "listing_id": listing_id,
+            "product_id": product_id,
             "total_count": total_count,
             "database_path": database_path,
             "product_name": inputs.product_name.strip(),
@@ -2669,6 +2678,7 @@ def _register_listing(
             total_count=total_count,
             database_path=database_path,
             product_name=inputs.product_name.strip(),
+            product_id=product_id,
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -2959,23 +2969,24 @@ def register_simple_listing(
         "created_at": now,
         "updated_at": now,
     }
-    columns = list(data)
     database_path = database_location_label(LISTING_DB_PATH)
     try:
-        with get_connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                f"INSERT INTO listings ({', '.join(columns)}) "
-                f"VALUES ({', '.join('?' for _ in columns)})",
-                tuple(data[column] for column in columns),
-            )
-            listing_id = int(cursor.lastrowid)
-            connection.commit()
+        registration = ListingRegistrationService(get_connection).register(
+            listing_data=data,
+            product_name=inputs.product_name,
+            platform=inputs.platform,
+            audit_metadata={
+                "source": "profit_calculator",
+                "registration_mode": "simple_profit",
+            },
+        )
+        listing_id = registration.listing_id
+        product_id = registration.product_id
 
         with get_connection() as verification_connection:
             saved_row = verification_connection.execute(
                 """
-                SELECT id, product_name, platform, expected_profit_yen
+                SELECT id, product_name, platform, expected_profit_yen, product_id
                 FROM listings
                 WHERE id = ?
                 """,
@@ -2994,9 +3005,14 @@ def register_simple_listing(
             raise RuntimeError(
                 f"保存確認時の販売プラットフォームが一致しません。ID: {listing_id}"
             )
+        if str(saved_row["product_id"]) != product_id:
+            raise RuntimeError(
+                f"保存確認時の商品IDが一致しません。ID: {listing_id}"
+            )
 
         event_details = {
             "listing_id": listing_id,
+            "product_id": product_id,
             "total_count": total_count,
             "database_path": database_path,
             "product_name": inputs.product_name.strip(),
@@ -3018,6 +3034,7 @@ def register_simple_listing(
             total_count=total_count,
             database_path=database_path,
             product_name=inputs.product_name.strip(),
+            product_id=product_id,
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

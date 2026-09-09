@@ -34,6 +34,7 @@ from currency_config import (  # noqa: E402
     currency_symbol,
     normalize_currency,
 )
+from integrated_ebay.migrations import run_schema_migrations  # noqa: E402
 from platform_config import (  # noqa: E402
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -711,6 +712,7 @@ def init_db() -> None:
             "UPDATE listings SET platform = ? WHERE platform = ?",
             (PLATFORM_IPHONE_RESALE, "その他"),
         )
+    run_schema_migrations(get_connection)
 
 
 def value(row: dict[str, object], key: str, fallback: str | None = None) -> float:

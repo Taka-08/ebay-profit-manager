@@ -182,11 +182,19 @@ class ListingRegistrationIntegrationTest(unittest.TestCase):
                        expected_profit_yen, planned_profit_margin,
                        country_of_origin, mfn_rate_percent,
                        us_tariff_applied_rate_percent,
-                       us_tariff_rule_version
+                       us_tariff_rule_version, product_id
                 FROM listings
                 """
             ).fetchone()
             count = connection.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+            product = connection.execute(
+                """
+                SELECT product_name, platform
+                FROM products
+                WHERE product_id = ?
+                """,
+                (row[11],),
+            ).fetchone()
         self.assertEqual(1, count)
         self.assertEqual("登録連携テスト商品", row[1])
         self.assertEqual(selected_carrier, row[2])
@@ -198,6 +206,8 @@ class ListingRegistrationIntegrationTest(unittest.TestCase):
         self.assertEqual(6.0, row[8])
         self.assertEqual(12.5, row[9])
         self.assertEqual("speedpak-us-estimated-2026-07-29", row[10])
+        self.assertTrue(str(row[11]).startswith("prd_"))
+        self.assertEqual(("登録連携テスト商品", "eBay"), product)
 
         event_path = self.workspace / "ebay_listing_manager" / "registration_event.json"
         log_path = self.workspace / "ebay_listing_manager" / "logs" / "registration.log"
