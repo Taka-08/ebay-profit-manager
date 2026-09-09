@@ -1,4 +1,4 @@
-"""Application services that coordinate repositories transactionally."""
+"""Application services for listing registration and the product catalog."""
 
 from __future__ import annotations
 
