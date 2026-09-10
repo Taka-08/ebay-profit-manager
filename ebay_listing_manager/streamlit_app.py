@@ -3403,7 +3403,8 @@ def inject_responsive_css() -> None:
             .block-container {
                 width: 100%;
                 max-width: 100%;
-                padding: 0.55rem 0.7rem 4rem;
+                /* Reserve Streamlit's fixed header above the mobile content. */
+                padding: calc(3.75rem + 0.55rem) 0.7rem 4rem;
             }
             h1 {
                 font-size: 1.3rem !important;
