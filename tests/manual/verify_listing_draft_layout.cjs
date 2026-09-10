@@ -38,13 +38,11 @@ async function verifyPageHeader(page, width) {
     };
   });
   assert(header.title.includes('出品管理ツール'));
-  if (width <= 768) {
-    assert(header.titleTextTop >= header.headerBottom, `App title overlaps the fixed header: ${JSON.stringify(header)}`);
-  }
+  assert(header.titleTextTop >= header.headerBottom, `App title overlaps the fixed header: ${JSON.stringify(header)}`);
   assert(header.titleTextRight <= width + 1);
   assert(header.documentWidth <= width + 1);
-  // Keep the desktop spacing unchanged while reserving the header on mobile.
-  assert(Math.abs(header.contentPaddingTop - header.rootFontSize * (width <= 768 ? 4.3 : 0.75)) < 1);
+  // Reserve the fixed header on both layouts while retaining their content gap.
+  assert(Math.abs(header.contentPaddingTop - header.rootFontSize * (width <= 768 ? 4.3 : 4.5)) < 1);
   return header;
 }
 

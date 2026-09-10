@@ -3321,7 +3321,7 @@ def inject_responsive_css() -> None:
         <style>
         .block-container {
             max-width: 1420px;
-            padding-top: 0.75rem;
+            padding-top: calc(3.75rem + 0.75rem);
             padding-bottom: 4rem;
         }
         .mobile-listing-cards {
