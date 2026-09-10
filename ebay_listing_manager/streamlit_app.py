@@ -36,6 +36,7 @@ from currency_config import (  # noqa: E402
 )
 from integrated_ebay.migrations import run_schema_migrations  # noqa: E402
 from integrated_ebay.product_master_ui import render_product_master  # noqa: E402
+from integrated_ebay.listing_draft_ui import open_product_drafts, render_listing_drafts  # noqa: E402
 from platform_config import (  # noqa: E402
     FEE_MODE_AMOUNT,
     FEE_MODE_RATE,
@@ -5183,15 +5184,18 @@ def main() -> None:
         )
     exchange_rate = read_shared_exchange_rate() or 150.0
     rows = fetch_listings()
-    management_tab, product_tab, analytics_tab, variance_tab = st.tabs(
-        ("出品管理", "商品マスター", "分析・集計", "予定と実績の差額分析")
+    management_tab, product_tab, draft_tab, analytics_tab, variance_tab = st.tabs(
+        ("出品管理", "商品マスター", "AI出品", "分析・集計", "予定と実績の差額分析"),
+        key="manager_main_tab", on_change="rerun",
     )
     with management_tab:
         render_dashboard()
         st.divider()
         render_management(rows, exchange_rate)
     with product_tab:
-        render_product_master(get_connection)
+        render_product_master(get_connection, on_create_draft=open_product_drafts)
+    with draft_tab:
+        render_listing_drafts(get_connection)
     with analytics_tab:
         render_analytics(rows)
     with variance_tab:

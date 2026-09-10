@@ -87,7 +87,7 @@ class ProductCatalogTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(
             [row[0] for row in migrations],
-            ["0001_integrated_foundation", "0002_product_catalog_inventory"],
+            ["0001_integrated_foundation", "0002_product_catalog_inventory", "0003_listing_drafts"],
         )
         self.assertTrue({"product_sources", "inventory", "product_images"} <= tables)
         self.assertEqual(count, 94)

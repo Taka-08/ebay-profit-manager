@@ -300,7 +300,7 @@ def _render_images(service: ProductCatalogService, product: dict[str, Any]) -> N
                 st.error(f"画像情報を登録できませんでした: {exc}")
 
 
-def _render_detail(service: ProductCatalogService, product_id: str) -> None:
+def _render_detail(service: ProductCatalogService, product_id: str, on_create_draft=None) -> None:
     product = service.get_product(product_id)
     if product is None:
         st.error("商品が見つかりません。")
@@ -309,6 +309,9 @@ def _render_detail(service: ProductCatalogService, product_id: str) -> None:
     st.caption(f"product_id: {product_id}")
     profit_url = _profit_calculator_url().rstrip("/") + "/?" + urlencode({"product_id": product_id})
     st.link_button("この商品で利益計算", profit_url, use_container_width=True)
+    if on_create_draft is not None:
+        st.button("AI出品下書きを作成", key=f"product_draft_{product_id}",
+                  on_click=on_create_draft, args=(product_id,), use_container_width=True)
     with st.expander("商品情報を編集", expanded=True):
         with st.form(f"product_edit_{product_id}"):
             values = _product_fields(st, product, f"edit_{product_id}")
@@ -339,7 +342,7 @@ def _render_detail(service: ProductCatalogService, product_id: str) -> None:
                 st.rerun()
 
 
-def render_product_master(connection_factory: Any) -> None:
+def render_product_master(connection_factory: Any, on_create_draft=None) -> None:
     st.markdown(
         """
         <style>
@@ -423,4 +426,4 @@ def render_product_master(connection_factory: Any) -> None:
         ),
         key="product_master_selected_id",
     )
-    _render_detail(service, selected_id)
+    _render_detail(service, selected_id, on_create_draft)

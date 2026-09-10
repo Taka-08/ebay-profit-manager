@@ -74,7 +74,7 @@ class IntegratedFoundationTest(unittest.TestCase):
         second = run_schema_migrations(self.connection_factory)
 
         self.assertEqual(
-            ("0001_integrated_foundation", "0002_product_catalog_inventory"),
+            ("0001_integrated_foundation", "0002_product_catalog_inventory", "0003_listing_drafts"),
             first,
         )
         self.assertEqual((), second)
@@ -105,7 +105,7 @@ class IntegratedFoundationTest(unittest.TestCase):
         )
         self.assertIn("product_id", columns)
         self.assertIsNone(legacy_product_id)
-        self.assertEqual(2, migration_count)
+        self.assertEqual(3, migration_count)
 
     def test_product_ids_are_unique_and_primary_key_is_enforced(self) -> None:
         run_schema_migrations(self.connection_factory)

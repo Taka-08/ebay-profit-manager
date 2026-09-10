@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .draft_migration import create_listing_draft_tables
+
 
 ConnectionFactory = Callable[[], Any]
 
@@ -232,7 +234,13 @@ PRODUCT_CATALOG_MIGRATION = Migration(
     apply=_create_product_catalog_tables,
 )
 
-MIGRATIONS = (FOUNDATION_MIGRATION, PRODUCT_CATALOG_MIGRATION)
+LISTING_DRAFT_MIGRATION = Migration(
+    migration_id="0003_listing_drafts",
+    description="Create listing drafts and immutable revision history",
+    apply=create_listing_draft_tables,
+)
+
+MIGRATIONS = (FOUNDATION_MIGRATION, PRODUCT_CATALOG_MIGRATION, LISTING_DRAFT_MIGRATION)
 
 
 def _ensure_migration_table(connection: Any) -> None:
