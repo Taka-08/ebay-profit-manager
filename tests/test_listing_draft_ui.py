@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -67,6 +68,11 @@ class ListingDraftUiTests(unittest.TestCase):
     def test_edit_save_approve_and_archive(self):
         draft_id = self.service.create(self.product_id, actor_id="Setup")
         self.service.generate(draft_id, actor_id="Setup", expected_revision=1)
+        self.service.update(draft_id, {'category_id': '31388', 'condition_id': '3000',
+            'publication_input_json': json.dumps({'sku': 'UI-TEST', 'country_of_origin': 'JP', 'weight_g': 500,
+                'length_cm': 20, 'width_cm': 10, 'height_cm': 5, 'exchange_rate': 150,
+                'shipping_yen': 2000, 'shipping_carrier': 'Japan Post', 'shipping_service': 'EMS',
+                'specifics_reviewed': True})}, expected_revision=2, actor_id='Setup')
         app = self.app()
         app.text_input(key="ai_draft_actor").set_value("Reviewer")
         next(w for w in app.text_input if w.label.startswith("Condition（")).set_value("Used")

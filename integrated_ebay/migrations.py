@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .draft_migration import create_listing_draft_tables
+from .publication_migration import create_publication_tables
 
 
 ConnectionFactory = Callable[[], Any]
@@ -240,7 +241,14 @@ LISTING_DRAFT_MIGRATION = Migration(
     apply=create_listing_draft_tables,
 )
 
-MIGRATIONS = (FOUNDATION_MIGRATION, PRODUCT_CATALOG_MIGRATION, LISTING_DRAFT_MIGRATION)
+LISTING_PUBLICATION_MIGRATION = Migration(
+    migration_id="0004_listing_publications",
+    description="Add approval snapshots and isolated publication receipts",
+    apply=create_publication_tables,
+)
+
+MIGRATIONS = (FOUNDATION_MIGRATION, PRODUCT_CATALOG_MIGRATION, LISTING_DRAFT_MIGRATION,
+              LISTING_PUBLICATION_MIGRATION)
 
 
 def _ensure_migration_table(connection: Any) -> None:

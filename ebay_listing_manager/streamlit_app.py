@@ -5196,7 +5196,7 @@ def main() -> None:
     with product_tab:
         render_product_master(get_connection, on_create_draft=open_product_drafts)
     with draft_tab:
-        render_listing_drafts(get_connection)
+        render_listing_drafts(get_connection, calculate_expected_values)
     with analytics_tab:
         render_analytics(rows)
     with variance_tab:

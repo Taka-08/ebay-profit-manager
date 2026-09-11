@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from contextlib import nullcontext
 from typing import Any
 
 from .repositories import (
@@ -60,14 +61,17 @@ class ListingRegistrationService:
         audit_metadata: Any = None,
         outbox_event: OutboxEventRequest | None = None,
         product_id: str | None = None,
+        connection: Any = None,
     ) -> ListingRegistrationResult:
         if not product_name.strip():
             raise ValueError("product_name is required")
         if "product_id" in listing_data:
             raise ValueError("product_id is managed by ListingRegistrationService")
 
-        with self.connection_factory() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        owns_transaction = connection is None
+        with (self.connection_factory() if owns_transaction else nullcontext(connection)) as connection:
+            if owns_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             products = ProductRepository(connection)
             if product_id is None:
                 resolved_product_id = products.create(

@@ -74,16 +74,20 @@ class ListingDraftTests(unittest.TestCase):
 
     def ready(self, draft_id):
         self.generate(draft_id)
-        self.edit(draft_id, condition_name="Used", price=30.0, quantity=2)
+        self.edit(draft_id, condition_name="Used", condition_id='3000', category_id='31388', price=30.0, quantity=2,
+                  publication_input_json=json.dumps({'sku': self.product_id, 'country_of_origin': 'JP',
+                    'weight_g': 500, 'length_cm': 20, 'width_cm': 10, 'height_cm': 5,
+                    'exchange_rate': 150, 'shipping_yen': 2000, 'shipping_carrier': 'Japan Post',
+                    'shipping_service': 'EMS', 'specifics_reviewed': True}))
         self.transition(draft_id, "READY_FOR_REVIEW")
 
     def test_migration_and_94_rows_unchanged(self):
-        self.assertEqual(("0003_listing_drafts",), self.applied)
+        self.assertEqual(("0003_listing_drafts", "0004_listing_publications"), self.applied)
         self.assertEqual((), run_schema_migrations(self.factory))
         self.assertEqual(self.before, self.legacy_snapshot())
         self.assertTrue(all(row["product_id"] is None for row in self.before["listings"]))
         with self.factory() as c:
-            self.assertEqual(3, c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0])
+            self.assertEqual(4, c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0])
             self.assertEqual(1, next(r for r in c.execute("PRAGMA table_info(listing_drafts)") if r[1] == "product_id")[3])
             self.assertTrue(list(c.execute("PRAGMA foreign_key_list(listing_drafts)")))
 

@@ -1,4 +1,4 @@
-"""Human review UI; no publishing or outbox events."""
+"""Human review and explicitly isolated Mock publication UI."""
 
 import html
 import json
@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 import streamlit as st
 
 from .draft_service import DRAFT_CURRENCIES, DRAFT_SITES, DRAFT_STATUSES, ListingDraftService
+from .publication_ui import edit_publication_inputs, render_publication
+from .publication_service import PublicationService, effective_status
 
 
 def open_product_drafts(product_id):
@@ -46,27 +48,28 @@ def _context(service, product_id):
         st.caption("画像内容の解析・仕入先URLへの自動アクセスは行いません。")
 
 
-def _editor(service, draft, actor):
+def _editor(service, draft, actor, calculate_expected=None):
     draft_id, revision = draft["listing_draft_id"], draft["revision"]
     prefix = f"draft_{draft_id}_{revision}"
     st.subheader("下書きを編集")
-    st.caption(f"{draft_id} / revision {revision} / {draft['status']}")
+    publication = PublicationService(service.connection_factory).get(draft_id)
+    st.caption(f"{draft_id} / revision {revision} / {effective_status(draft, publication)}")
     notes = json.loads(draft["review_notes_json"])
     for note in notes:
         st.warning(str(note))
     with st.expander("生成元・根拠・要確認項目", expanded=False):
         st.json(json.loads(draft["generation_output_json"]), expanded=False)
         st.caption(f"モデル: {draft['ai_model'] or '未生成'} / Prompt: {draft['prompt_version'] or 'なし'}")
-    archived = draft["status"] == "ARCHIVED"
+    archived = draft["status"] == "ARCHIVED" or bool(publication and publication['status'] in ('PUBLISHING', 'PUBLISHED', 'FAILED'))
     with st.form(prefix, clear_on_submit=False):
         title = st.text_input("Title", value=draft["title"], max_chars=service.generator.policy.title_limit, disabled=archived)
         description = st.text_area("Description", value=draft["description"], height=280, disabled=archived)
         cat = st.columns(2)
         category_name = cat[0].text_input("Category（ローカル候補・要確認）", value=draft["category_name"] or "", disabled=archived)
-        category_id = cat[1].text_input("Category ID（任意・未検証）", value=draft["category_id"] or "", disabled=archived)
+        category_id = cat[1].text_input("Category ID（承認時必須・未照合）", value=draft["category_id"] or "", disabled=archived)
         cond = st.columns(2)
         condition_name = cond[0].text_input("Condition（例: New / Used、要現物確認）", value=draft["condition_name"] or "", disabled=archived)
-        condition_id = cond[1].text_input("Condition ID（任意・未検証）", value=draft["condition_id"] or "", disabled=archived)
+        condition_id = cond[1].text_input("Condition ID（承認時必須・未照合）", value=draft["condition_id"] or "", disabled=archived)
         st.caption("傷・使用感・動作確認・欠品はDescriptionへ記録してください。")
         row = st.columns(4)
         price = row[0].number_input("Price", min_value=0.0, value=draft["price"], step=0.01, disabled=archived)
@@ -76,6 +79,7 @@ def _editor(service, draft, actor):
         specifics = st.text_area("Item Specifics（JSON）", value=json.dumps(json.loads(draft["item_specifics_json"]), ensure_ascii=False, indent=2), height=260, disabled=archived)
         profile = st.text_area("Shipping profile（保存済みスナップショット・JSON）", value=draft["shipping_profile_json"], disabled=archived)
         review_notes = st.text_area("確認メモ（1行1件）", value="\n".join(str(x) for x in notes), disabled=archived)
+        publication_input = edit_publication_inputs(draft, disabled=archived)
         saved = st.form_submit_button("下書きを保存", type="primary", disabled=archived, use_container_width=True)
     if saved:
         try:
@@ -85,6 +89,7 @@ def _editor(service, draft, actor):
                 "condition_id": condition_id.strip() or None, "price": price, "currency": currency,
                 "quantity": quantity, "site": site, "item_specifics_json": specifics,
                 "shipping_profile_json": profile, "review_notes_json": json.dumps(review_notes.splitlines(), ensure_ascii=False),
+                "publication_input_json": publication_input,
             }, expected_revision=revision, actor_id=actor)
             _notice("保存しました。編集後は承認が解除され、DRAFTに戻ります。")
         except ValueError as exc:
@@ -109,6 +114,7 @@ def _editor(service, draft, actor):
             _transition(service, draft, "REJECTED", actor)
         if actions[2].button("アーカイブ", key=prefix + "_archive", use_container_width=True):
             _transition(service, draft, "ARCHIVED", actor)
+    render_publication(service, draft, calculate_expected)
     with st.expander("変更履歴", expanded=False):
         for item in service.revisions(draft_id):
             with st.expander(f"r{item['revision']} {item['action']} / {item['actor_type']}:{item['actor_id']} / {item['created_at']}"):
@@ -123,7 +129,7 @@ def _transition(service, draft, status, actor, reviewed=False):
         st.error(str(exc))
 
 
-def render_listing_drafts(connection_factory):
+def render_listing_drafts(connection_factory, calculate_expected=None):
     service = ListingDraftService(connection_factory)
     with st.container(key="ai_listing_workspace"):
         st.markdown("""<style>
@@ -143,7 +149,7 @@ def render_listing_drafts(connection_factory):
         }
         </style>""", unsafe_allow_html=True)
         st.header("AI出品")
-        st.info("ローカル生成モード（外部AI未接続）。下書き・内部承認のみ。eBayへの送信は行いません。")
+        st.info("ローカル生成モード（外部AI未接続）。承認後にMock公開を検証できます。実eBayへの送信は行いません。")
         notice = st.session_state.pop("ai_draft_notice", None)
         if notice:
             st.success(notice)
@@ -181,8 +187,11 @@ def render_listing_drafts(connection_factory):
                     _notice("下書きを作成しました。要確認項目を確認してください。")
                 except ValueError as exc:
                     st.error(str(exc))
-        status = st.selectbox("下書きの状態で絞り込み", ("ALL", *DRAFT_STATUSES), key="ai_status_filter")
-        drafts = service.list(product_id, None if status == "ALL" else status)
+        status = st.selectbox("下書きの状態で絞り込み", ("ALL", *DRAFT_STATUSES, 'PUBLISHING', 'PUBLISHED', 'FAILED'), key="ai_status_filter")
+        drafts = service.list(product_id)
+        publisher = PublicationService(connection_factory)
+        drafts = [dict(d, status=effective_status(d, publisher.get(d['listing_draft_id']))) for d in drafts]
+        drafts = [d for d in drafts if status == 'ALL' or d['status'] == status]
         if not drafts:
             st.info("条件に一致する下書きがありません。")
             return
@@ -204,4 +213,4 @@ def render_listing_drafts(connection_factory):
             st.session_state["ai_selected_draft"] = draft_ids[0]
         chosen = st.selectbox("編集する下書き", draft_ids, format_func=lambda value: next(
             f"{d['title'] or '未生成'} / {d['status']} / {value}" for d in drafts if d["listing_draft_id"] == value), key="ai_selected_draft")
-        _editor(service, service.get(chosen), actor)
+        _editor(service, service.get(chosen), actor, calculate_expected)

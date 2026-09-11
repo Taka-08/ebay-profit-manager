@@ -7,7 +7,9 @@ from .ai_listing import AIListingGenerator
 from .draft_repository import ListingDraftRepository, encode
 from .ids import generate_entity_id
 from .migrations import utc_now
-from .repositories import AuditLogRepository, InventoryRepository, ProductRepository
+from .repositories import AuditLogRepository, InventoryRepository, ProductRepository, ListingRepository
+from .publication_repository import PublicationRepository
+from .publication_validation import validate_publication
 from .services import ProductCatalogService, available_quantity
 
 
@@ -16,7 +18,7 @@ DRAFT_CURRENCIES = ("USD", "CAD", "GBP", "AUD", "EUR", "JPY")
 DRAFT_SITES = ("EBAY_US", "EBAY_CA", "EBAY_GB", "EBAY_AU", "EBAY_DE", "EBAY_FR", "EBAY_IT", "EBAY_ES")
 EDIT_FIELDS = {"title", "description", "category_id", "category_name", "condition_id",
                "condition_name", "price", "currency", "quantity", "site",
-               "item_specifics_json", "shipping_profile_json", "review_notes_json"}
+               "item_specifics_json", "shipping_profile_json", "review_notes_json", "publication_input_json"}
 
 
 class DraftConflict(ValueError):
@@ -96,7 +98,7 @@ class ListingDraftService:
             raise ValueError("価格は0以上の有限数を入力してください。")
         if quantity is not None and (isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 0):
             raise ValueError("数量は0以上の整数を入力してください。")
-        for key, expected in (("item_specifics_json", dict), ("shipping_profile_json", dict), ("review_notes_json", list)):
+        for key, expected in (("item_specifics_json", dict), ("shipping_profile_json", dict), ("review_notes_json", list), ("publication_input_json", dict)):
             value = json.loads(draft[key])
             if not isinstance(value, expected):
                 raise ValueError(f"{key}: JSONの形式が不正です。")
@@ -134,7 +136,7 @@ class ListingDraftService:
                 currency = selected.get("currency_code") or "USD"
                 profile = {"source_listing_id": calculation_id,
                            "shipping_breakdown_json": selected.get("shipping_breakdown_json")}
-                context["selected_calculation"] = selected
+                context["selected_calculation"] = ListingRepository(connection).get(calculation_id)
             now, draft_id = utc_now(), generate_entity_id("listing_draft")
             values = {
                 "listing_draft_id": draft_id, "product_id": product_id, "marketplace": "eBay",
@@ -161,11 +163,17 @@ class ListingDraftService:
                 raise DraftConflict("別の操作で更新されています。最新の下書きを読み直してください。")
             if before["status"] == "ARCHIVED":
                 raise ValueError("アーカイブ済みの下書きは変更できません。新しい下書きを作成してください。")
+            publication = PublicationRepository(connection).guard_edit(draft_id)
             # Archiving remains available even when the parent product is archived.
             if action != "listing_draft.archived":
                 self._check_product(connection, before["product_id"])
             after = dict(before)
             mutate(after, connection)
+            if publication and after['status'] != 'APPROVED':
+                PublicationRepository(connection).update(publication['publication_id'], status='CANCELLED', updated_at=utc_now())
+                AuditLogRepository(connection).append(entity_type='publication', entity_id=publication['publication_id'],
+                    action='publication.cancelled', actor_type='human', actor_id=actor_id,
+                    before=publication, after={'status': 'CANCELLED'})
             after.update(revision=before["revision"] + 1, updated_at=utc_now(), last_actor_type=actor_type)
             self._validate(after)
             repo.replace(after)
@@ -185,6 +193,8 @@ class ListingDraftService:
     def generate(self, draft_id, *, expected_revision, actor_id):
         actor_id = self._actor(actor_id)
         before = self.get(draft_id)
+        with self.connection_factory() as connection:
+            PublicationRepository(connection).guard_edit(draft_id)
         if before["revision"] != expected_revision or before["status"] == "ARCHIVED":
             raise DraftConflict("下書きの状態が変わっています。最新情報を読み直してください。")
         context = self.context(before["product_id"])
@@ -212,6 +222,14 @@ class ListingDraftService:
         action = {"READY_FOR_REVIEW": "updated", "APPROVED": "approved", "REJECTED": "rejected", "ARCHIVED": "archived"}[status]
 
         def change(draft, connection):
+            allowed = {
+                'DRAFT': {'READY_FOR_REVIEW', 'REJECTED', 'ARCHIVED'},
+                'READY_FOR_REVIEW': {'APPROVED', 'REJECTED', 'ARCHIVED'},
+                'APPROVED': {'REJECTED', 'ARCHIVED'},
+                'REJECTED': {'READY_FOR_REVIEW', 'ARCHIVED'},
+            }
+            if status not in allowed.get(draft['status'], set()):
+                raise ValueError('この状態からの遷移は許可されていません。編集・保存後にレビューしてください。')
             if status == "APPROVED":
                 if draft["status"] != "READY_FOR_REVIEW" or not reviewed:
                     raise ValueError("レビュー待ちにして、内容確認にチェックを入れてください。")
@@ -226,7 +244,19 @@ class ListingDraftService:
                 available = available_quantity(inventory)
                 if available is not None and draft["quantity"] > available:
                     raise ValueError("出品数量が現在の利用可能在庫を超えています。")
+                inputs = validate_publication(connection, draft)
                 draft.update(approved_at=utc_now(), approved_by=self._actor(actor_id))
+                snapshot = dict(draft, status='APPROVED', revision=draft['revision'] + 1)
+                publication_id = generate_entity_id('marketplace_listing')
+                PublicationRepository(connection).insert({
+                    'publication_id': publication_id, 'listing_draft_id': draft_id,
+                    'product_id': draft['product_id'], 'approved_revision': snapshot['revision'],
+                    'mode': 'MOCK', 'status': 'APPROVED', 'sku': str(inputs['sku']).strip(),
+                    'marketplace': draft['site'], 'currency': draft['currency'], 'final_price': draft['price'],
+                    'quantity': draft['quantity'], 'idempotency_key': f"publish:MOCK:{draft_id}:{snapshot['revision']}",
+                    'approved_snapshot_json': encode(snapshot), 'approved_by': actor_id,
+                    'created_at': draft['approved_at'], 'updated_at': draft['approved_at'],
+                })
             else:
                 draft.update(approved_at=None, approved_by=None)
             draft["status"] = status
