@@ -276,20 +276,42 @@ def _ensure_legacy_listing_link(connection: Any) -> None:
     )
 
 
+def _legacy_listing_link_needs_update(connection: Any) -> bool:
+    columns = _table_columns(connection, "listings")
+    if not columns:
+        return False
+    if "product_id" not in columns:
+        return True
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+        "AND tbl_name = 'listings' AND name = 'idx_listings_product_id'"
+    ).fetchone() is None
+
+
 def run_schema_migrations(connection_factory: ConnectionFactory) -> tuple[str, ...]:
     """Apply each pending migration once and reconcile the legacy bridge.
 
-    Every migration runs in its own transaction. The listing bridge is also
+    Every pending migration runs in its own transaction. Applied migrations
+    are checked without opening idle-prone remote write transactions.
+    The listing bridge is also
     checked on every startup so a database bootstrapped before the legacy
     ``listings`` table existed can still be repaired without data backfills.
     """
     with connection_factory() as connection:
-        _ensure_migration_table(connection)
+        if not _table_exists(connection, "schema_migrations"):
+            _ensure_migration_table(connection)
+        known_applied = {
+            str(row[0])
+            for row in connection.execute("SELECT migration_id FROM schema_migrations")
+        }
 
     applied: list[str] = []
     for migration in MIGRATIONS:
+        if migration.migration_id in known_applied:
+            continue
         with connection_factory() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            # Another process may have applied it after the read-only check.
             already_applied = connection.execute(
                 "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
                 (migration.migration_id,),
@@ -308,7 +330,10 @@ def run_schema_migrations(connection_factory: ConnectionFactory) -> tuple[str, .
             applied.append(migration.migration_id)
 
     with connection_factory() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        _ensure_legacy_listing_link(connection)
+        needs_listing_link = _legacy_listing_link_needs_update(connection)
+    if needs_listing_link:
+        with connection_factory() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _ensure_legacy_listing_link(connection)
 
     return tuple(applied)

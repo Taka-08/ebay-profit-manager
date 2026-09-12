@@ -157,7 +157,12 @@ class RemoteCompatibleConnection:
             if exc_type is None:
                 self.commit()
             else:
-                self.rollback()
+                try:
+                    self.rollback()
+                except Exception as rollback_error:
+                    # Turso may already have rolled back an expired transaction.
+                    # Preserve the original error instead of masking its cause.
+                    exc_value.add_note(f"Rollback also failed: {rollback_error}")
         finally:
             self.close()
         return False
