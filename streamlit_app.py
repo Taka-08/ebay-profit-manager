@@ -619,6 +619,8 @@ def load_exchange_rate(currency_code: str = DEFAULT_CURRENCY) -> None:
         st.session_state.exchange_rate_input = st.session_state.exchange_rate
         st.session_state.exchange_rate_manual = saved_data.get("mode") == "manual"
         st.session_state.exchange_rate_loaded_currency = currency
+    # Streamlit removes hidden widget state when another platform is rendered.
+    st.session_state.exchange_rate_input = st.session_state.exchange_rate
     startup_key = f"exchange_rate_startup_checked_{currency}"
     if not st.session_state.get(startup_key):
         st.session_state[startup_key] = True
@@ -3068,7 +3070,7 @@ def inject_compact_css() -> None:
         <style>
         .block-container {
             max-width: 1420px;
-            padding-top: 0.65rem;
+            padding-top: 4.5rem;
             padding-bottom: 4rem;
         }
         h1 {
@@ -3458,7 +3460,7 @@ def inject_compact_css() -> None:
             .block-container {
                 width: 100%;
                 max-width: 100%;
-                padding: 0.5rem 0.7rem 4rem;
+                padding: 4.3rem 0.7rem 4rem;
             }
             h1 {
                 font-size: 1.25rem !important;
@@ -3748,19 +3750,25 @@ def render_header() -> None:
     st.caption("販売プラットフォームに合わせて、必要な費用と利益を計算します。")
 
 
+def apply_exchange_currency() -> None:
+    st.session_state.exchange_currency = st.session_state.exchange_currency_input
+
+
 def render_exchange_rate() -> tuple[str, float, float]:
     """Render the selected currency rate and return product and USD rates."""
     st.markdown("### 為替レート")
     currency_col, rate_col, button_col, time_col = st.columns([0.9, 1.1, 0.9, 1.4])
+    st.session_state.exchange_currency_input = normalize_currency(
+        st.session_state.get("exchange_currency", st.session_state.get("exchange_rate_loaded_currency"))
+    )
     currency = currency_col.selectbox(
         "販売通貨",
         SUPPORTED_CURRENCIES,
-        index=SUPPORTED_CURRENCIES.index(
-            normalize_currency(st.session_state.get("exchange_currency"))
-        ),
         format_func=currency_option_label,
-        key="exchange_currency",
+        key="exchange_currency_input",
+        on_change=apply_exchange_currency,
     )
+    st.session_state.exchange_currency = currency
     load_exchange_rate(currency)
     rate_col.number_input(
         f"現在の{currency}/JPYレート",
