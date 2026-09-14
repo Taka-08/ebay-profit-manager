@@ -101,6 +101,8 @@ class PublicationService:
             c.execute('BEGIN IMMEDIATE')
             repo = PublicationRepository(c)
             record = repo.get_for_draft(draft_id)
+            if c.execute("SELECT 1 FROM sqlite_master WHERE name='approval_requests' AND type='table'").fetchone():
+                raise ValueError('第6段階のMockは承認・実行キュー専用です。通常の出品管理には登録しません。')
             if not record:
                 raise ValueError('第5段階の検証を通過した承認済み版がありません。編集・レビュー・承認してください。')
             if record['status'] == 'PUBLISHED':

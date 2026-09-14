@@ -288,7 +288,7 @@ def _legacy_listing_link_needs_update(connection: Any) -> bool:
     ).fetchone() is None
 
 
-def run_schema_migrations(connection_factory: ConnectionFactory) -> tuple[str, ...]:
+def run_schema_migrations(connection_factory: ConnectionFactory, *, migration_set=None) -> tuple[str, ...]:
     """Apply each pending migration once and reconcile the legacy bridge.
 
     Every pending migration runs in its own transaction. Applied migrations
@@ -306,7 +306,7 @@ def run_schema_migrations(connection_factory: ConnectionFactory) -> tuple[str, .
         }
 
     applied: list[str] = []
-    for migration in MIGRATIONS:
+    for migration in MIGRATIONS if migration_set is None else migration_set:
         if migration.migration_id in known_applied:
             continue
         with connection_factory() as connection:

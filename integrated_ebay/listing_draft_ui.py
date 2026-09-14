@@ -9,6 +9,7 @@ import streamlit as st
 from .draft_service import DRAFT_CURRENCIES, DRAFT_SITES, DRAFT_STATUSES, ListingDraftService
 from .publication_ui import edit_publication_inputs, render_publication
 from .publication_service import PublicationService, effective_status
+from .approval_ui import render_draft_approval_link
 
 
 def open_product_drafts(product_id):
@@ -114,7 +115,8 @@ def _editor(service, draft, actor, calculate_expected=None):
             _transition(service, draft, "REJECTED", actor)
         if actions[2].button("アーカイブ", key=prefix + "_archive", use_container_width=True):
             _transition(service, draft, "ARCHIVED", actor)
-    render_publication(service, draft, calculate_expected)
+    if not render_draft_approval_link(service.connection_factory, draft, actor):
+        render_publication(service, draft, calculate_expected)
     with st.expander("変更履歴", expanded=False):
         for item in service.revisions(draft_id):
             with st.expander(f"r{item['revision']} {item['action']} / {item['actor_type']}:{item['actor_id']} / {item['created_at']}"):
