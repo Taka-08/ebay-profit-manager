@@ -26,6 +26,7 @@ from app_database import (  # noqa: E402
     get_database_connection,
     remote_database_is_configured,
 )
+from db_diagnostics import trace_init, trace_run  # noqa: E402
 from currency_config import (  # noqa: E402
     DEFAULT_CURRENCY,
     DEFAULT_JPY_RATES,
@@ -493,6 +494,7 @@ def get_connection():
     return get_database_connection(DB_PATH)
 
 
+@trace_init
 def init_db() -> None:
     with get_connection() as connection:
         connection.execute("PRAGMA journal_mode = WAL")
@@ -5174,6 +5176,7 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
         st.rerun()
 
 
+@trace_run
 def main() -> None:
     render_header()
     init_db()
