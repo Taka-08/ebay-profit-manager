@@ -7,9 +7,6 @@ import sqlite3
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
-
-from db_diagnostics import operation, sql_label
 
 
 TURSO_URL_ENV = "TURSO_DATABASE_URL"
@@ -56,10 +53,8 @@ class CompatibleRow(Mapping[str, Any]):
 class CompatibleCursor:
     """Wrap libSQL tuple rows with named access used by the existing apps."""
 
-    def __init__(self, cursor: Any, connection_id=None, query_id=None) -> None:
+    def __init__(self, cursor: Any) -> None:
         self._cursor = cursor
-        self._diagnostic_connection_id = connection_id
-        self._diagnostic_query_id = query_id
 
     def _columns(self) -> tuple[str, ...]:
         return tuple(column[0] for column in (self._cursor.description or ()))
@@ -70,13 +65,11 @@ class CompatibleCursor:
         return CompatibleRow(self._columns(), tuple(row))
 
     def fetchone(self) -> CompatibleRow | None:
-        with operation("fetchone", self._diagnostic_connection_id, query_id=self._diagnostic_query_id):
-            return self._row(self._cursor.fetchone())
+        return self._row(self._cursor.fetchone())
 
     def fetchall(self) -> list[CompatibleRow]:
-        with operation("fetchall", self._diagnostic_connection_id, query_id=self._diagnostic_query_id):
-            columns = self._columns()
-            return [CompatibleRow(columns, tuple(row)) for row in self._cursor.fetchall()]
+        columns = self._columns()
+        return [CompatibleRow(columns, tuple(row)) for row in self._cursor.fetchall()]
 
     def fetchmany(self, size: int | None = None) -> list[CompatibleRow]:
         rows = (
@@ -88,13 +81,12 @@ class CompatibleCursor:
         return [CompatibleRow(columns, tuple(row)) for row in rows]
 
     def __iter__(self) -> Iterator[CompatibleRow]:
-        with operation("iterate", self._diagnostic_connection_id, query_id=self._diagnostic_query_id):
-            columns = self._columns()
-            while True:
-                row = self._cursor.fetchone()
-                if row is None:
-                    break
-                yield CompatibleRow(columns, tuple(row))
+        columns = self._columns()
+        while True:
+            row = self._cursor.fetchone()
+            if row is None:
+                break
+            yield CompatibleRow(columns, tuple(row))
 
     @property
     def description(self) -> Any:
@@ -121,25 +113,23 @@ class RemoteCompatibleConnection:
         "pragma synchronous",
     )
 
-    def __init__(self, connection: Any, diagnostic_id=None) -> None:
+    def __init__(self, connection: Any) -> None:
         self._connection = connection
-        self._diagnostic_id = diagnostic_id or uuid4().hex[:12]
 
     def execute(
         self,
         statement: str,
         parameters: tuple[Any, ...] | list[Any] | None = None,
     ) -> CompatibleCursor:
-        with operation("execute", self._diagnostic_id, sql_label(statement)) as query_id:
-            normalized = statement.strip().casefold()
-            if normalized.startswith(self._LOCAL_ONLY_PRAGMAS):
-                return CompatibleCursor(self._connection.execute("SELECT 1 WHERE 0"), self._diagnostic_id, query_id)
-            cursor = (
-                self._connection.execute(statement)
-                if parameters is None
-                else self._connection.execute(statement, parameters)
-            )
-            return CompatibleCursor(cursor, self._diagnostic_id, query_id)
+        normalized = statement.strip().casefold()
+        if normalized.startswith(self._LOCAL_ONLY_PRAGMAS):
+            return CompatibleCursor(self._connection.execute("SELECT 1 WHERE 0"))
+        cursor = (
+            self._connection.execute(statement)
+            if parameters is None
+            else self._connection.execute(statement, parameters)
+        )
+        return CompatibleCursor(cursor)
 
     def executemany(self, statement: str, parameters: Any) -> CompatibleCursor:
         return CompatibleCursor(self._connection.executemany(statement, parameters))
@@ -151,16 +141,13 @@ class RemoteCompatibleConnection:
         return CompatibleCursor(self._connection.cursor())
 
     def commit(self) -> None:
-        with operation("commit", self._diagnostic_id):
-            self._connection.commit()
+        self._connection.commit()
 
     def rollback(self) -> None:
-        with operation("rollback", self._diagnostic_id):
-            self._connection.rollback()
+        self._connection.rollback()
 
     def close(self) -> None:
-        with operation("close", self._diagnostic_id):
-            self._connection.close()
+        self._connection.close()
 
     def __enter__(self) -> RemoteCompatibleConnection:
         return self
@@ -236,14 +223,12 @@ def get_database_connection(local_path: str | Path) -> Any:
                 "requirements.txtから依存関係をインストールしてください。"
             ) from exc
 
-        diagnostic_id = uuid4().hex[:12]
-        with operation("connect", diagnostic_id):
-            connection = libsql.connect(
-                database=url,
-                auth_token=token,
-                timeout=30,
-            )
-        return RemoteCompatibleConnection(connection, diagnostic_id)
+        connection = libsql.connect(
+            database=url,
+            auth_token=token,
+            timeout=30,
+        )
+        return RemoteCompatibleConnection(connection)
 
     path = Path(local_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

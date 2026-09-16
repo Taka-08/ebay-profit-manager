@@ -26,7 +26,6 @@ from app_database import (  # noqa: E402
     get_database_connection,
     remote_database_is_configured,
 )
-from db_diagnostics import trace_init, trace_run  # noqa: E402
 from currency_config import (  # noqa: E402
     DEFAULT_CURRENCY,
     DEFAULT_JPY_RATES,
@@ -494,7 +493,6 @@ def get_connection():
     return get_database_connection(DB_PATH)
 
 
-@trace_init
 def init_db() -> None:
     with get_connection() as connection:
         connection.execute("PRAGMA journal_mode = WAL")
@@ -713,10 +711,15 @@ def init_db() -> None:
         for column, definition in required.items():
             if column not in existing:
                 connection.execute(f"ALTER TABLE listings ADD COLUMN {column} {definition}")
-        connection.execute(
-            "UPDATE listings SET platform = ? WHERE platform = ?",
-            (PLATFORM_IPHONE_RESALE, "その他"),
-        )
+        legacy_platform_exists = bool(connection.execute(
+            "SELECT 1 FROM listings WHERE platform = ? LIMIT 1",
+            ("その他",),
+        ).fetchall())
+        if legacy_platform_exists:
+            connection.execute(
+                "UPDATE listings SET platform = ? WHERE platform = ?",
+                (PLATFORM_IPHONE_RESALE, "その他"),
+            )
     run_schema_migrations(get_connection)
 
 
@@ -5176,7 +5179,6 @@ def render_management(rows: list[dict[str, object]], exchange_rate: float) -> No
         st.rerun()
 
 
-@trace_run
 def main() -> None:
     render_header()
     init_db()
