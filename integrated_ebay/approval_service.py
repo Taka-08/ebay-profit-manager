@@ -5,6 +5,7 @@ import math
 from hashlib import sha256
 
 from .approval_repository import ApprovalRepository, marketplace_record
+from .change_safety import binding, validate_change_values, validate_local, validate_remote, validate_result
 from .draft_repository import ListingDraftRepository, encode
 from .ebay_api import MockEbayProvider, execution_mode, require_mock_execution
 from .ids import generate_entity_id
@@ -111,6 +112,13 @@ class ApprovalService:
         if action == 'CREATE_LISTING' and c.execute('''SELECT 1 FROM approval_requests WHERE product_id=? AND mode=?
             AND action_type='CREATE_LISTING' AND status NOT IN ('REJECTED','CANCELLED')''', (product_id, self.mode)).fetchone():
             raise ValueError('この商品にはすでに新規出品の承認要求があります。')
+        if marketplace_id:
+            duplicate = c.execute('''SELECT * FROM approval_requests WHERE marketplace_listing_id=?
+                AND mode=? AND action_type=? AND proposed_payload_json=?
+                AND status NOT IN ('REJECTED','CANCELLED') ORDER BY created_at LIMIT 1''',
+                (marketplace_id, self.mode, action, encode(payload))).fetchone()
+            if duplicate:
+                return dict(duplicate)
         now = utc_now()
         values = dict(approval_request_id=generate_entity_id('approval_request'), product_id=product_id,
             listing_draft_id=draft_id, publication_id=publication_id, marketplace_listing_id=marketplace_id,
@@ -148,6 +156,13 @@ class ApprovalService:
             if not listing or listing['mode'] != 'MOCK' or listing['status'] != 'ACTIVE':
                 raise ValueError('第6段階で紐付いた有効なMock出品を選択してください。')
             payload = dict(external_listing_id=listing['external_listing_id'], expected_revision=listing['version'], changes=changes)
+            payload.update(target=binding(listing), expected_before=json.loads(listing['current_payload_json']))
+            product = ProductRepository(c).get(listing['product_id'])
+            if not product:
+                raise ValueError('紐付く商品がありません。')
+            # Product SKU is optional; the approved listing may intentionally use another SKU.
+            payload['product_sku'] = product['sku']
+            validate_change_values(payload)
             if action == 'END_LISTING':
                 payload['end_reason'] = reason.strip()
             return self._insert(c, product_id=listing['product_id'], draft_id=listing['listing_draft_id'],
@@ -181,16 +196,24 @@ class ApprovalService:
             raise ValueError('現在値が提案時から変わりました。再提案してください。')
         if listing['external_listing_id'] != payload['external_listing_id']:
             raise ValueError('送信先IDが一致しません。')
+        validate_local(listing, ProductRepository(c).get(r['product_id']), r, payload)
         return listing
 
     def _validate_before_send(self, r, payload):
         try:
             with self.factory() as c:
-                return self._current(c, r, payload)
+                self._current(c, r, payload)
         except ValueError as exc:
             # Nothing was dispatched, so this is safe to cancel/re-propose.
             code = 'APPROVAL_MISMATCH' if r['action_type'] == 'CREATE_LISTING' else 'STALE'
             raise PublicationError(code, '承認時から対象の版が変更されています。') from exc
+        if r['action_type'] != 'CREATE_LISTING':
+            # No write has been dispatched: failed reads may be retried, not reconciled as writes.
+            try:
+                remote = self.provider.get_listing(payload['external_listing_id'])
+            except Exception as exc:
+                raise PublicationError('READ_FAILED', '実行前の現在値取得に失敗しました。送信していません。') from exc
+            validate_remote(payload, remote)
 
     def edit(self, request_id, changes, *, reason, expected_version, actor_id, actor_type='human'):
         self._local()
@@ -209,6 +232,7 @@ class ApprovalService:
             payload['changes'] = changes
             if r['action_type'] == 'END_LISTING':
                 payload['end_reason'] = reason.strip()
+            validate_change_values(payload)
             repo.update(request_id, proposed_payload_json=encode(payload), reason=reason.strip(),
                         version=r['version'] + 1, updated_at=utc_now())
             result = repo.get(request_id)
@@ -322,6 +346,8 @@ class ApprovalService:
         except Exception as exc:
             return self._fail(r, actor, exc)
         try:
+            if self.mode == 'MOCK' and r['action_type'] != 'CREATE_LISTING':
+                self._verify_change_result(r, result)
             return self._finish(r, result, actor)
         except Exception:
             return self._fail(r, actor, PublicationError('UNKNOWN_RESULT', '結果保存の照合が必要です。', uncertain=True))
@@ -329,19 +355,24 @@ class ApprovalService:
     def _fail(self, r, actor, exc):
         known = isinstance(exc, PublicationError)
         uncertain = exc.uncertain if known else True
-        code = exc.code if known and exc.code in ('DISABLED','INVALID','CONFLICT','STALE','APPROVAL_MISMATCH','FAILED','UNKNOWN_RESULT','TEST_FAILURE') else 'UNKNOWN_RESULT'
+        code = exc.code if known and exc.code in ('DISABLED','INVALID','CONFLICT','STALE','APPROVAL_MISMATCH','FAILED',
+            'UNKNOWN_RESULT','TEST_FAILURE','READ_FAILED','AUTH_EXPIRED','RATE_LIMIT') else 'UNKNOWN_RESULT'
         message = '処理結果が未確定です。再送せず結果を照合してください。' if uncertain else 'Mock処理に失敗しました。内容・状態を確認して再試行または再提案してください。'
         if code == 'APPROVAL_MISMATCH' and not uncertain:
             message = '承認済みpayloadと現在の下書きが一致しません。送信はしていません。提案を取り消し、下書きを再承認して再提案してください。'
         elif code == 'STALE' and not uncertain:
-            message = '提案時から出品の現在値が変わっています。この変更は実行していません。取り消して再提案してください。'
+            message = '対象の識別子・通貨・現在値が承認版と一致しません。送信していません。取り消して再提案してください。'
+        elif code == 'READ_FAILED' and not uncertain:
+            message = '実行前の現在値取得に失敗しました。送信していません。接続状態を確認してください。'
+        elif code in ('AUTH_EXPIRED', 'RATE_LIMIT') and not uncertain:
+            message = '認証期限またはAPI制限によって拒否されました。自動再送はしません。原因を解消してから再確認してください。'
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
             repo = ApprovalRepository(c)
             current = repo.get(r['approval_request_id'])
             if current['status'] != 'EXECUTING' or current['attempt_count'] != r['attempt_count']:
                 return current
-            repo.update(r['approval_request_id'], status='FAILED', execution_status='FAILED', error_code=code,
+            repo.update(r['approval_request_id'], status='FAILED', execution_status='UNKNOWN' if uncertain else 'FAILED', error_code=code,
                 error_message=message, reconcile_required=int(uncertain), version=current['version'] + 1, updated_at=utc_now())
             c.execute('''UPDATE approval_execution_attempts SET status='FAILED',finished_at=?,error_code=?,error_message=?
                 WHERE approval_request_id=? AND attempt_number=?''', (utc_now(), code, message, r['approval_request_id'], r['attempt_count']))
@@ -357,12 +388,26 @@ class ApprovalService:
         r = self.get(request_id)
         if not r or r['mode'] != self.mode or not r['reconcile_required'] or r['status'] not in ('FAILED','EXECUTING'):
             raise ValueError('結果照合の対象ではありません。')
-        result = self.provider.lookup_execution(r['idempotency_key'])
+        try:
+            result = self.provider.lookup_execution(r['idempotency_key'])
+        except Exception:
+            raise PublicationError('UNKNOWN_RESULT', '実行記録を取得できません。再送せず、後で照合してください。', uncertain=True) from None
         if result is None:
             raise ValueError('実行結果を確認できません。自動再送は行いません。')
-        return self._finish(r, result, actor)
+        if r['action_type'] != 'CREATE_LISTING':
+            self._verify_change_result(r, result)
+        return self._finish(r, result, actor, reconciled=True)
 
-    def _finish(self, r, result, actor):
+    def _verify_change_result(self, r, result):
+        validate_result(r['action_type'], json.loads(r['approved_payload_json']), result)
+        try:
+            remote = self.provider.get_listing(result['external_listing_id'])
+        except Exception:
+            raise PublicationError('UNKNOWN_RESULT', '出品先の現在値を取得できません。再送せず、後で照合してください。', uncertain=True) from None
+        if remote != result:
+            raise PublicationError('UNKNOWN_RESULT', '実行記録と出品先の現在値が一致しません。再送せず人間が確認してください。', uncertain=True)
+
+    def _finish(self, r, result, actor, *, reconciled=False):
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
             repo = ApprovalRepository(c)
@@ -388,13 +433,15 @@ class ApprovalService:
                          encode(result['payload']), result['version'], utc_now(), utc_now()))
                 else:
                     listing = marketplace_record(c, marketplace_id)
-                    if listing['version'] != result['version'] - 1 or listing['external_listing_id'] != external:
-                        raise ValueError('連携データの版が一致しません。')
+                    payload = json.loads(current['approved_payload_json'])
+                    self._current(c, current, payload)
+                    validate_result(current['action_type'], payload, result)
                     # Preserve historical profits/shipping JSON in the legacy listing.
                     c.execute('''UPDATE marketplace_listings SET current_payload_json=?,status=?,version=?,updated_at=?,
                         approval_request_id=? WHERE marketplace_listing_id=?''',
                         (encode(result['payload']), result['status'], result['version'], utc_now(), r['approval_request_id'], marketplace_id))
-            repo.update(r['approval_request_id'], status='SUCCEEDED', execution_status='DRY_RUN' if r['mode']=='DRY_RUN' else 'SUCCEEDED',
+            execution_status = 'DRY_RUN' if r['mode']=='DRY_RUN' else 'RECONCILED' if reconciled else 'SUCCEEDED'
+            repo.update(r['approval_request_id'], status='SUCCEEDED', execution_status=execution_status,
                 result_json=encode(result), external_listing_id=external, marketplace_listing_id=marketplace_id,
                 executed_at=utc_now(), updated_at=utc_now(), reconcile_required=0, error_message=None, error_code=None,
                 version=current['version'] + 1)
@@ -403,6 +450,8 @@ class ApprovalService:
                 WHERE approval_request_id=? AND attempt_number=?''', (utc_now(), encode(result), r['approval_request_id'], r['attempt_count']))
             after = repo.get(r['approval_request_id'])
             self._audit(c, after, 'ebay.execution.succeeded', actor, 'system', before=current)
+            if reconciled:
+                self._audit(c, after, 'ebay.execution.reconciled', actor, 'human')
             if r['mode'] == 'MOCK':
                 action = 'listing.mock_published' if r['action_type']=='CREATE_LISTING' else 'listing.mock_ended' if r['action_type']=='END_LISTING' else 'listing.mock_updated'
                 self._audit(c, after, action, actor, 'system')

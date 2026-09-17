@@ -7,6 +7,7 @@ from hashlib import sha256
 from typing import Protocol
 
 from app_database import _secret_value
+from .change_safety import validate_remote
 from .draft_repository import encode
 from .migrations import utc_now
 from .publication_provider import MockPublicationProvider, PublicationError, PublicationReceipt
@@ -114,6 +115,7 @@ class MockEbayProvider(MockPublicationProvider):
                 if row is None or row['status'] != 'ACTIVE' or row['version'] != payload['expected_revision']:
                     raise PublicationError('STALE', '出品状態が提案時から変わりました。再提案してください。')
                 result = self._result(row)
+                validate_remote(payload, result)
                 result['payload'].update(payload.get('changes', {}))
                 result.update(status='ENDED' if action == 'END_LISTING' else 'ACTIVE', version=row['version'] + 1)
                 c.execute('UPDATE ebay_mock_listings SET payload_json=?,status=?,version=? WHERE external_listing_id=?',

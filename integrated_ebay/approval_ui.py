@@ -74,6 +74,7 @@ def _comparison(row):
     changes = proposed if row['action_type'] == 'CREATE_LISTING' else proposed['changes']
     currency = before.get('currency', proposed.get('currency', ''))
     st.write(f"{row['action_type']} · {row['status']} · {row['mode']}")
+    st.caption(f"実行状態: {row['execution_status']} / 承認者: {row['approved_by'] or '未承認'} / 実行日時: {row['executed_at'] or '未実行'}")
     st.caption(f"{row['created_at']} / {row['created_actor_type']}:{row['created_by']}")
     if 'price' in changes:
         old, new = before.get('price'), changes['price']
@@ -84,6 +85,14 @@ def _comparison(row):
             st.caption(f'差額: {delta:+,.2f} / 変更率: {rate}')
     if 'quantity' in changes:
         st.write(f"数量: {before.get('quantity', '新規')} → {changes['quantity']}")
+        if changes['quantity'] == 0:
+            st.caption('数量0として保持します。出品終了とは別の操作です。')
+    if row['action_type'] == 'END_LISTING':
+        st.warning('状態: ACTIVE → ENDED（出品終了）')
+    target = proposed.get('target', {})
+    if target:
+        st.text(f"SKU: {target['sku']} / Marketplace: {target['marketplace']} / 通貨: {target['currency']}")
+        st.text('商品ID: ' + target['product_id'])
     if proposed.get('external_listing_id'):
         st.text('Item ID: ' + proposed['external_listing_id'])
     st.text('理由: ' + row['reason'])
@@ -165,6 +174,8 @@ def _review(service, row, actor, disabled):
             _run(lambda: service.cancel(rid, expected_version=version, actor_id=actor), '提案を取り消しました。')
     if row['status'] == 'SUCCEEDED':
         st.success('Dry-run検証済み（未送信）' if row['mode'] == 'DRY_RUN' else 'Mock実行済み')
+        if row['execution_status'] == 'RECONCILED':
+            st.caption('RECONCILED: 保存済みの実行記録と現在値を照合済み（再送なし）')
         st.text('外部出品ID: ' + str(row['external_listing_id'] or 'なし'))
     with st.expander('固定payload・実行履歴'):
         st.json(json.loads(row['approved_payload_json'] or row['proposed_payload_json']), expanded=False)
