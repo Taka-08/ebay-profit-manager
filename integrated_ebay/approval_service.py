@@ -47,6 +47,20 @@ def validate_changes(action, changes):
 
 
 class ApprovalService:
+    request_table = 'approval_requests'
+    attempt_table = 'approval_execution_attempts'
+    listing_table = 'marketplace_listings'
+    event_type = EVENT_TYPE
+
+    def _repo(self, c):
+        return ApprovalRepository(c)
+
+    def _listing(self, c, key):
+        return marketplace_record(c, key)
+
+    def _claim_target(self, c, r):
+        pass
+
     def __init__(self, factory, *, calculate_expected=None, mode=None, provider=None):
         self.factory = factory
         self.calculate_expected = calculate_expected
@@ -79,19 +93,19 @@ class ApprovalService:
 
     def get(self, request_id):
         with self.factory() as c:
-            return ApprovalRepository(c).get(request_id)
+            return self._repo(c).get(request_id)
 
     def list(self):
         with self.factory() as c:
-            return ApprovalRepository(c).list()
+            return self._repo(c).list()
 
     def history(self, request_id):
         with self.factory() as c:
-            return ApprovalRepository(c).attempts(request_id)
+            return self._repo(c).attempts(request_id)
 
     def listings(self):
         with self.factory() as c:
-            return [dict(r) for r in c.execute('''SELECT m.*,p.product_name FROM marketplace_listings m
+            return [dict(r) for r in c.execute(f'''SELECT m.*,p.product_name FROM {self.listing_table} m
                 JOIN products p ON p.product_id=m.product_id ORDER BY m.updated_at DESC''')]
 
     def _insert(self, c, *, product_id, draft_id, publication_id, marketplace_id, action, payload,
@@ -102,18 +116,18 @@ class ApprovalService:
         product = ProductRepository(c).get(product_id)
         if not product or str(product['status']).upper() == 'ARCHIVED':
             raise ValueError('商品が見つからないかアーカイブ済みです。')
-        previous = c.execute('SELECT * FROM approval_requests WHERE idempotency_key=?', (key,)).fetchone()
+        previous = c.execute(f'SELECT * FROM {self.request_table} WHERE idempotency_key=?', (key,)).fetchone()
         if previous:
             if (previous['product_id'], previous['action_type'], previous['mode'], previous['proposed_payload_json'],
                 previous['reason'], previous['marketplace_listing_id'], previous['publication_id']) != (
                     product_id, action, self.mode, encode(payload), reason.strip(), marketplace_id, publication_id):
                 raise ValueError('同じ冪等キーの提案内容が異なります。')
             return dict(previous)
-        if action == 'CREATE_LISTING' and c.execute('''SELECT 1 FROM approval_requests WHERE product_id=? AND mode=?
+        if action == 'CREATE_LISTING' and c.execute(f'''SELECT 1 FROM {self.request_table} WHERE product_id=? AND mode=?
             AND action_type='CREATE_LISTING' AND status NOT IN ('REJECTED','CANCELLED')''', (product_id, self.mode)).fetchone():
             raise ValueError('この商品にはすでに新規出品の承認要求があります。')
         if marketplace_id:
-            duplicate = c.execute('''SELECT * FROM approval_requests WHERE marketplace_listing_id=?
+            duplicate = c.execute(f'''SELECT * FROM {self.request_table} WHERE marketplace_listing_id=?
                 AND mode=? AND action_type=? AND proposed_payload_json=?
                 AND status NOT IN ('REJECTED','CANCELLED') ORDER BY created_at LIMIT 1''',
                 (marketplace_id, self.mode, action, encode(payload))).fetchone()
@@ -125,7 +139,7 @@ class ApprovalService:
             action_type=action, mode=self.mode, status='PENDING', proposed_payload_json=encode(payload),
             before_payload_json=encode(before), reason=reason.strip(), source_status=str(source_status),
             created_by=actor, created_actor_type=actor_type, created_at=now, updated_at=now, idempotency_key=key)
-        repo = ApprovalRepository(c)
+        repo = self._repo(c)
         repo.insert(values)
         result = repo.get(values['approval_request_id'])
         self._audit(c, result, 'proposal.created', actor, actor_type)
@@ -152,8 +166,8 @@ class ApprovalService:
         validate_changes(action, changes)
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            listing = marketplace_record(c, marketplace_id)
-            if not listing or listing['mode'] != 'MOCK' or listing['status'] != 'ACTIVE':
+            listing = self._listing(c, marketplace_id)
+            if not listing or listing['mode'] != ('SANDBOX' if self.mode == 'SANDBOX' else 'MOCK') or listing['status'] != 'ACTIVE':
                 raise ValueError('第6段階で紐付いた有効なMock出品を選択してください。')
             payload = dict(external_listing_id=listing['external_listing_id'], expected_revision=listing['version'], changes=changes)
             payload.update(target=binding(listing), expected_before=json.loads(listing['current_payload_json']))
@@ -191,7 +205,7 @@ class ApprovalService:
                 raise ValueError('現在の利用可能在庫が不足しています。')
             validate_publication(c, frozen)
             return publication
-        listing = marketplace_record(c, r['marketplace_listing_id'])
+        listing = self._listing(c, r['marketplace_listing_id'])
         if not listing or listing['status'] != 'ACTIVE' or listing['version'] != payload['expected_revision']:
             raise ValueError('現在値が提案時から変わりました。再提案してください。')
         if listing['external_listing_id'] != payload['external_listing_id']:
@@ -220,7 +234,7 @@ class ApprovalService:
         actor = self._actor(actor_id, actor_type, human=True)
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            repo = ApprovalRepository(c)
+            repo = self._repo(c)
             r = repo.get(request_id)
             self._version(r, expected_version)
             if r['status'] != 'PENDING' or r['action_type'] == 'CREATE_LISTING':
@@ -246,7 +260,7 @@ class ApprovalService:
             raise ValueError('人間による内容確認が必要です。')
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            repo = ApprovalRepository(c)
+            repo = self._repo(c)
             r = repo.get(request_id)
             if r and r['status'] in ('APPROVED','EXECUTING','SUCCEEDED','FAILED'):
                 return r
@@ -263,10 +277,10 @@ class ApprovalService:
                 if not end_confirmed:
                     raise ValueError('出品終了の最終確認が必要です。')
                 payload['end_confirmed'] = True
-            event = OutboxRepository(c).enqueue(event_type=EVENT_TYPE, aggregate_type='approval_request',
+            event = OutboxRepository(c).enqueue(event_type=self.event_type, aggregate_type='approval_request',
                 aggregate_id=request_id, payload={'approval_request_id': request_id, 'mode': r['mode'],
                                                  'payload_hash': payload_hash(payload)},
-                idempotency_key='ebay.execute:' + r['idempotency_key'])
+                idempotency_key=('ebay.sandbox.execute:' if self.mode == 'SANDBOX' else 'ebay.execute:') + r['idempotency_key'])
             repo.update(request_id, status='APPROVED', approved_payload_json=encode(payload), approved_by=actor,
                 approved_at=utc_now(), updated_at=utc_now(), execution_status='QUEUED',
                 outbox_event_id=event.event_id, version=r['version'] + 1)
@@ -286,7 +300,7 @@ class ApprovalService:
         actor = self._actor(actor, actor_type, human=True)
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            repo = ApprovalRepository(c)
+            repo = self._repo(c)
             r = repo.get(request_id)
             self._version(r, version)
             allowed = ('PENDING',) if status == 'REJECTED' else ('PENDING','APPROVED','FAILED')
@@ -304,7 +318,7 @@ class ApprovalService:
         actor = self._actor(actor_id)
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            repo = ApprovalRepository(c)
+            repo = self._repo(c)
             r = repo.get(request_id)
             if not r or r['mode'] != self.mode:
                 raise ValueError('承認要求または実行モードが一致しません。')
@@ -317,16 +331,17 @@ class ApprovalService:
             payload = json.loads(r['approved_payload_json'])
             event = c.execute('SELECT * FROM outbox_events WHERE event_id=?', (r['outbox_event_id'],)).fetchone()
             expected = {'approval_request_id': request_id, 'mode': r['mode'], 'payload_hash': payload_hash(payload)}
-            if not event or event['event_type'] != EVENT_TYPE or event['aggregate_id'] != request_id or json.loads(event['payload_json']) != expected:
+            if not event or event['event_type'] != self.event_type or event['aggregate_id'] != request_id or json.loads(event['payload_json']) != expected:
                 raise ValueError('承認済みキューの照合に失敗しました。送信しません。')
             if r['action_type'] == 'END_LISTING' and payload.get('end_confirmed') is not True:
                 raise ValueError('出品終了の最終確認がありません。')
+            self._claim_target(c, r)
             now = utc_now()
             repo.update(request_id, status='EXECUTING', execution_status='RUNNING', reconcile_required=1,
                         attempt_count=r['attempt_count'] + 1, last_attempt_at=now, version=r['version'] + 1, updated_at=now)
             c.execute("UPDATE outbox_events SET status='processing',attempt_count=attempt_count+1,updated_at=? WHERE event_id=?", (now, r['outbox_event_id']))
             r = repo.get(request_id)
-            c.execute('''INSERT INTO approval_execution_attempts
+            c.execute(f'''INSERT INTO {self.attempt_table}
                 (approval_request_id,attempt_number,status,started_at,actor_id) VALUES (?,?,'STARTED',?,?)''',
                 (request_id, r['attempt_count'], now, actor))
             self._audit(c, r, 'ebay.execution.started', actor, 'system')
@@ -346,7 +361,7 @@ class ApprovalService:
         except Exception as exc:
             return self._fail(r, actor, exc)
         try:
-            if self.mode == 'MOCK' and r['action_type'] != 'CREATE_LISTING':
+            if self.mode in ('MOCK', 'SANDBOX') and r['action_type'] != 'CREATE_LISTING':
                 self._verify_change_result(r, result)
             return self._finish(r, result, actor)
         except Exception:
@@ -358,6 +373,8 @@ class ApprovalService:
         code = exc.code if known and exc.code in ('DISABLED','INVALID','CONFLICT','STALE','APPROVAL_MISMATCH','FAILED',
             'UNKNOWN_RESULT','TEST_FAILURE','READ_FAILED','AUTH_EXPIRED','RATE_LIMIT') else 'UNKNOWN_RESULT'
         message = '処理結果が未確定です。再送せず結果を照合してください。' if uncertain else 'Mock処理に失敗しました。内容・状態を確認して再試行または再提案してください。'
+        if self.mode == 'SANDBOX' and not uncertain:
+            message = 'Sandbox処理を停止しました。内容・状態を確認して再提案してください。'
         if code == 'APPROVAL_MISMATCH' and not uncertain:
             message = '承認済みpayloadと現在の下書きが一致しません。送信はしていません。提案を取り消し、下書きを再承認して再提案してください。'
         elif code == 'STALE' and not uncertain:
@@ -368,13 +385,13 @@ class ApprovalService:
             message = '認証期限またはAPI制限によって拒否されました。自動再送はしません。原因を解消してから再確認してください。'
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            repo = ApprovalRepository(c)
+            repo = self._repo(c)
             current = repo.get(r['approval_request_id'])
             if current['status'] != 'EXECUTING' or current['attempt_count'] != r['attempt_count']:
                 return current
             repo.update(r['approval_request_id'], status='FAILED', execution_status='UNKNOWN' if uncertain else 'FAILED', error_code=code,
                 error_message=message, reconcile_required=int(uncertain), version=current['version'] + 1, updated_at=utc_now())
-            c.execute('''UPDATE approval_execution_attempts SET status='FAILED',finished_at=?,error_code=?,error_message=?
+            c.execute(f'''UPDATE {self.attempt_table} SET status='FAILED',finished_at=?,error_code=?,error_message=?
                 WHERE approval_request_id=? AND attempt_number=?''', (utc_now(), code, message, r['approval_request_id'], r['attempt_count']))
             c.execute("UPDATE outbox_events SET status=?,updated_at=? WHERE event_id=?",
                       ('needs_reconciliation' if uncertain else 'pending', utc_now(), r['outbox_event_id']))
@@ -410,7 +427,7 @@ class ApprovalService:
     def _finish(self, r, result, actor, *, reconciled=False):
         with self.factory() as c:
             c.execute('BEGIN IMMEDIATE')
-            repo = ApprovalRepository(c)
+            repo = self._repo(c)
             current = repo.get(r['approval_request_id'])
             if current['status'] == 'SUCCEEDED':
                 return current
@@ -432,7 +449,7 @@ class ApprovalService:
                          r['approval_request_id'], external, frozen['sku'], frozen['site'], 'MOCK', result['status'],
                          encode(result['payload']), result['version'], utc_now(), utc_now()))
                 else:
-                    listing = marketplace_record(c, marketplace_id)
+                    listing = self._listing(c, marketplace_id)
                     payload = json.loads(current['approved_payload_json'])
                     self._current(c, current, payload)
                     validate_result(current['action_type'], payload, result)
@@ -440,13 +457,15 @@ class ApprovalService:
                     c.execute('''UPDATE marketplace_listings SET current_payload_json=?,status=?,version=?,updated_at=?,
                         approval_request_id=? WHERE marketplace_listing_id=?''',
                         (encode(result['payload']), result['status'], result['version'], utc_now(), r['approval_request_id'], marketplace_id))
+            if current['mode'] == 'SANDBOX':
+                external = self._save_sandbox_result(c, current, result)
             execution_status = 'DRY_RUN' if r['mode']=='DRY_RUN' else 'RECONCILED' if reconciled else 'SUCCEEDED'
             repo.update(r['approval_request_id'], status='SUCCEEDED', execution_status=execution_status,
                 result_json=encode(result), external_listing_id=external, marketplace_listing_id=marketplace_id,
                 executed_at=utc_now(), updated_at=utc_now(), reconcile_required=0, error_message=None, error_code=None,
                 version=current['version'] + 1)
             OutboxRepository(c).mark_processed(r['outbox_event_id'])
-            c.execute('''UPDATE approval_execution_attempts SET status='SUCCEEDED',finished_at=?,result_json=?
+            c.execute(f'''UPDATE {self.attempt_table} SET status='SUCCEEDED',finished_at=?,result_json=?
                 WHERE approval_request_id=? AND attempt_number=?''', (utc_now(), encode(result), r['approval_request_id'], r['attempt_count']))
             after = repo.get(r['approval_request_id'])
             self._audit(c, after, 'ebay.execution.succeeded', actor, 'system', before=current)
@@ -460,7 +479,7 @@ class ApprovalService:
     def execute_next(self, *, actor_id):
         self._local()
         with self.factory() as c:
-            row = c.execute('''SELECT a.approval_request_id FROM approval_requests a JOIN outbox_events o
+            row = c.execute(f'''SELECT a.approval_request_id FROM {self.request_table} a JOIN outbox_events o
                 ON o.event_id=a.outbox_event_id WHERE o.event_type=? AND o.status='pending'
-                AND a.status='APPROVED' AND a.mode=? ORDER BY a.approved_at LIMIT 1''', (EVENT_TYPE, self.mode)).fetchone()
+                AND a.status='APPROVED' AND a.mode=? ORDER BY a.approved_at LIMIT 1''', (self.event_type, self.mode)).fetchone()
         return self.execute(row[0], actor_id=actor_id) if row else None

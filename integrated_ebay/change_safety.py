@@ -17,6 +17,9 @@ BINDING_FIELDS = ('marketplace_listing_id', 'product_id', 'listing_draft_id',
 
 
 def binding(listing):
+    if listing.get('mode') == 'SANDBOX':
+        from .sandbox_inventory import sandbox_binding
+        return sandbox_binding(listing)
     target = {key: listing[key] for key in BINDING_FIELDS}
     before = json.loads(listing['current_payload_json'])
     target['currency'] = before.get('currency')
@@ -83,6 +86,8 @@ def validate_remote(payload, remote):
 def validate_result(action, payload, result):
     expected = dict(payload['expected_before'])
     expected.update(payload['changes'])
+    if payload.get('target', {}).get('mode') == 'SANDBOX' and 'quantity' in payload['changes']:
+        expected['inventory_quantity'] = expected['offer_quantity'] = payload['changes']['quantity']
     if (not isinstance(result, dict) or result.get('external_listing_id') != payload['external_listing_id']
             or result.get('payload') != expected or result.get('version') != payload['expected_revision'] + 1
             or result.get('status') != ('ENDED' if action == 'END_LISTING' else 'ACTIVE')):

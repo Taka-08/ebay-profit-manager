@@ -17,6 +17,9 @@ def _run(operation, message):
     except (ValueError, PublicationError) as exc:
         st.error(str(exc))
         return
+    except Exception:
+        st.error('処理状態を確認できません。再実行せず履歴を確認してください。')
+        return
     if result and result.get('status') == 'FAILED':
         st.session_state['approval_notice'] = result['error_message']
     else:
@@ -93,6 +96,9 @@ def _comparison(row):
     if target:
         st.text(f"SKU: {target['sku']} / Marketplace: {target['marketplace']} / 通貨: {target['currency']}")
         st.text('商品ID: ' + target['product_id'])
+        if row['mode'] == 'SANDBOX':
+            st.text('Sandbox Offer ID: ' + target['offer_id'])
+            st.text('Seller照合ID: ' + target['seller_account'])
     if proposed.get('external_listing_id'):
         st.text('Item ID: ' + proposed['external_listing_id'])
     st.text('理由: ' + row['reason'])
@@ -102,14 +108,20 @@ def _comparison(row):
 
 def _propose_update(service, actor, disabled):
     targets = {r['marketplace_listing_id']: r for r in service.listings() if r['status'] == 'ACTIVE'}
-    with st.expander('Mock出品の変更を提案'):
+    sandbox = service.mode == 'SANDBOX'
+    with st.expander('Sandbox出品の変更を提案' if sandbox else 'Mock出品の変更を提案'):
         if not targets:
-            st.caption('第6段階のMock実行結果を保存した後に選択できます。通常の出品管理データは変更しません。')
+            st.caption('検証用Offerを読み取り確認してSandbox専用DBへ紐付ける必要があります。通常の出品管理データは変更しません。' if sandbox else '第6段階のMock実行結果を保存した後に選択できます。通常の出品管理データは変更しません。')
             return
-        target = st.selectbox('対象Mock出品', list(targets),
+        target = st.selectbox('対象Sandbox出品' if sandbox else '対象Mock出品', list(targets),
             format_func=lambda k: targets[k]['product_name'] + ' / ' + targets[k]['external_listing_id'], key='proposal_target')
-        action = st.selectbox('操作', ACTIONS[1:], key='proposal_action')
+        action = st.selectbox('操作', ACTIONS[1:4] if sandbox else ACTIONS[1:], key='proposal_action')
         listing = targets[target]
+        if sandbox:
+            refresh_ok = st.checkbox('未実行の提案を取消済みです。Sandbox現在値を再取得します', key='sandbox_refresh_confirm')
+            if st.button('再提案用の現在値を取得', disabled=disabled or not refresh_ok, use_container_width=True):
+                _run(lambda: service.refresh_test_offer(target, actor_id=actor, refresh_confirmed=refresh_ok),
+                     '現在値を取得しました。変更を反映するには新しい提案と承認が必要です。')
         values = json.loads(listing['current_payload_json'])
         prior = next((r['approval_request_id'] for r in service.list() if r['marketplace_listing_id'] == target
                       and r['action_type'] == action and r['mode'] == service.mode), 'initial')
@@ -141,7 +153,7 @@ def _review(service, row, actor, disabled):
         reviewed = st.checkbox('提案内容を人間が確認しました', key=prefix+'_reviewed')
         st.caption('「提案を承認」は保存済み内容が対象です。入力変更を反映する場合は「編集して承認」を使用してください。')
         end = row['action_type'] == 'END_LISTING'
-        confirmed = st.checkbox('このMock出品を終了することを最終確認しました', key=prefix+'_end') if end else False
+        confirmed = st.checkbox('このSandbox出品を終了することを最終確認しました' if row['mode'] == 'SANDBOX' else 'このMock出品を終了することを最終確認しました', key=prefix+'_end') if end else False
         cols = st.columns(3)
         if cols[0].button('提案を承認', key=prefix+'_approve', type='primary', disabled=disabled or not reviewed or (end and not confirmed), use_container_width=True):
             _run(lambda: service.approve(rid, expected_version=version, actor_id=actor,
@@ -163,17 +175,19 @@ def _review(service, row, actor, disabled):
                 _run(lambda: service.reconcile(rid, actor_id=actor), '保存済みの実行結果を照合しました。')
         else:
             confirm_label = '出品終了のMock実行を確認しました' if row['action_type'] == 'END_LISTING' else '第6段階専用データへのMock/Dry-run保存を確認しました'
+            if row['mode'] == 'SANDBOX':
+                confirm_label = 'Sandboxのテスト出品に実際の変更を送信することを確認しました'
             execute_ok = st.checkbox(confirm_label, key=prefix+'_execute_confirm')
-            label = 'Mock実行' if row['mode'] == 'MOCK' else 'Dry-run実行'
+            label = 'Sandbox実行' if row['mode'] == 'SANDBOX' else 'Mock実行' if row['mode'] == 'MOCK' else 'Dry-run実行'
             if row['status'] == 'FAILED':
                 label += 'を再試行'
             if st.button(label, key=prefix+'_execute', disabled=disabled or not execute_ok, type='primary', use_container_width=True):
-                _run(lambda: service.execute(rid, actor_id=actor), '実行結果を保存しました。実eBayへの変更はありません。')
+                _run(lambda: service.execute(rid, actor_id=actor), 'Sandbox結果を保存しました。Productionは変更していません。' if row['mode'] == 'SANDBOX' else '実行結果を保存しました。実eBayへの変更はありません。')
     if row['status'] in ('PENDING', 'APPROVED', 'FAILED') and not row['reconcile_required']:
         if st.button('提案を取り消す', key=prefix+'_cancel', disabled=disabled, use_container_width=True):
             _run(lambda: service.cancel(rid, expected_version=version, actor_id=actor), '提案を取り消しました。')
     if row['status'] == 'SUCCEEDED':
-        st.success('Dry-run検証済み（未送信）' if row['mode'] == 'DRY_RUN' else 'Mock実行済み')
+        st.success('Sandbox実行・現在値照合済み' if row['mode'] == 'SANDBOX' else 'Dry-run検証済み（未送信）' if row['mode'] == 'DRY_RUN' else 'Mock実行済み')
         if row['execution_status'] == 'RECONCILED':
             st.caption('RECONCILED: 保存済みの実行記録と現在値を照合済み（再送なし）')
         st.text('外部出品ID: ' + str(row['external_listing_id'] or 'なし'))
@@ -192,6 +206,8 @@ def render_approvals(factory, calculate_expected=None):
         st.markdown('''<style>
         .st-key-approval_workspace {min-width:0;overflow-wrap:anywhere;}
         .st-key-approval_workspace [data-testid="stText"] {white-space:pre-wrap;overflow-wrap:anywhere;}
+        .st-key-approval_workspace [data-testid="stButton"] button,
+        .st-key-approval_workspace [data-testid="stFormSubmitButton"] button {min-height:46px;}
         @media(max-width:768px) {
           .st-key-approval_workspace [data-testid="stHorizontalBlock"] {flex-direction:column;}
           .st-key-approval_workspace [data-testid="stColumn"] {width:100%!important;flex:1 1 100%!important;min-width:0;}
@@ -205,15 +221,31 @@ def render_approvals(factory, calculate_expected=None):
         except ValueError as exc:
             st.error(str(exc))
             return
-        st.info(f'現在のeBay実行モード: {mode} / 外部eBay通信は無効です。実eBayへの変更は発生しません。')
+        st.info(f'現在のeBay実行モード: {mode} / Production書き込み無効')
+        if mode != 'SANDBOX':
+            st.caption('外部eBay通信は無効です。実eBayへの変更は発生しません。')
         if not approval_schema_ready(factory):
             st.warning('第6段階のDB基盤は未適用です。本番への適用にはバックアップと別途承認が必要です。')
             return
-        disabled = mode not in ('MOCK', 'DRY_RUN')
+        disabled = mode not in ('MOCK', 'DRY_RUN', 'SANDBOX')
         if disabled:
             st.warning('Sandbox・Productionは実行できません。Mock/Dry-runに限定しています。')
-        st.caption('Mock結果・承認履歴は接続中DBの第6段階用データに保存します。通常の出品・送料・利益データは変更しません。')
-        service = ApprovalService(factory, calculate_expected=calculate_expected, mode=mode)
+        if mode == 'SANDBOX':
+            from .sandbox_migration import sandbox_schema_ready
+            from .sandbox_service import SandboxApprovalService
+            if not sandbox_schema_ready(factory):
+                st.warning('Sandbox専用DBは未適用です。本番DBには自動適用しません。')
+                return
+            service = SandboxApprovalService(factory)
+            try:
+                service._local()
+            except PublicationError as exc:
+                st.warning(str(exc))
+                return
+            st.warning('Sandbox専用テスト出品への実通信です。新規公開・Production・通常出品管理登録は無効です。')
+        else:
+            st.caption('Mock結果・承認履歴は接続中DBの第6段階用データに保存します。通常の出品・送料・利益データは変更しません。')
+            service = ApprovalService(factory, calculate_expected=calculate_expected, mode=mode)
         notice = st.session_state.pop('approval_notice', None)
         if notice:
             st.info(notice)
