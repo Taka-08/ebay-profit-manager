@@ -14,7 +14,6 @@ from .sandbox_oauth import OAuthSetupError, validate_settings
 START_PATH = "ebay-sandbox-start"
 ACCEPTED_PATH = "ebay-sandbox-accepted"
 DECLINED_PATH = "ebay-sandbox-declined"
-CALLBACK_LIFETIME_SECONDS = 300
 TOKEN_HANDOFF_SECONDS = 120
 
 
@@ -74,10 +73,16 @@ def _capture_callback():
     if valid:
         state, code = states[0], codes[0]
         valid = bool(state and code and len(state) <= 4096 and len(code) <= 32768)
-        if valid:
-            st.session_state["_sandbox_oauth_callback"] = (state, code, time.monotonic())
     params.clear()
-    return valid
+    if not valid:
+        return False
+    try:
+        _setup_key()
+        result = sandbox_callback_registry.exchange(state, code)
+    except OAuthSetupError:
+        return False
+    st.session_state["_sandbox_oauth_refresh"] = (result.refresh_token, time.monotonic())
+    return True
 
 
 def _clear_sensitive_session():
@@ -113,29 +118,7 @@ def render_accepted():
         st.button("受け渡しを終了", on_click=_clear_sensitive_session)
         return
 
-    pending = st.session_state.get("_sandbox_oauth_callback")
-    if not pending or time.monotonic() - pending[2] > CALLBACK_LIFETIME_SECONDS:
-        _clear_sensitive_session()
-        st.warning("有効な同意結果がありません。最初からやり直してください。")
-        return
-    supplied = st.text_input("セットアップキー", type="password", autocomplete="off")
-    confirmed = st.checkbox("Sandboxの認可コードを一度だけ交換します")
-    if st.button("Sandbox Tokenを取得"):
-        if not confirmed or not _authorized(supplied):
-            failures = st.session_state.get("_sandbox_oauth_key_failures", 0) + 1
-            st.session_state["_sandbox_oauth_key_failures"] = failures
-            if failures >= 3:
-                _clear_sensitive_session()
-            st.error("確認できませんでした。")
-            return
-        state, code, _ = st.session_state.pop("_sandbox_oauth_callback")
-        try:
-            result = sandbox_callback_registry.exchange(state, code)
-        except OAuthSetupError:
-            st.error("交換できませんでした。同じコードは再送せず、最初からやり直してください。")
-            return
-        st.session_state["_sandbox_oauth_refresh"] = (result.refresh_token, time.monotonic())
-        st.rerun()
+    st.warning("有効な同意結果がありません。最初からやり直してください。")
 
 
 def render_declined():

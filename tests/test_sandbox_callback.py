@@ -43,10 +43,6 @@ class QueryParams(dict):
         super().clear()
 
 
-class RerunSignal(Exception):
-    pass
-
-
 class FakeStreamlit:
     def __init__(self, query=None):
         self.query_params = QueryParams(query)
@@ -54,7 +50,6 @@ class FakeStreamlit:
         self.screen = []
         self.inputs = []
         self.clicked = set()
-        self.confirmed = False
         self.supplied = ''
 
     def title(self, value):
@@ -70,9 +65,6 @@ class FakeStreamlit:
         self.inputs.append((label, kwargs))
         return self.supplied
 
-    def checkbox(self, label):
-        return self.confirmed
-
     def button(self, label, on_click=None):
         clicked = label in self.clicked
         if clicked and on_click is not None:
@@ -81,10 +73,6 @@ class FakeStreamlit:
 
     def link_button(self, label, url):
         self.screen.append(label)
-
-    def rerun(self):
-        raise RerunSignal()
-
 
 class CallbackRegistryTests(unittest.TestCase):
     def test_state_matching_single_exchange_and_concurrent_replay(self):
@@ -160,27 +148,30 @@ class CallbackPageTests(unittest.TestCase):
             context.start()
             self.addCleanup(context.stop)
 
-    def test_accepted_query_removed_before_exchange_and_token_masked(self):
+    def test_accepted_exchanges_once_and_masks_token_after_query_clear(self):
         state = state_from(self.registry.begin(settings()))
         self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
-        with patch.object(SandboxHTTP, 'exchange_authorization_code', return_value=fixture_tokens()) as exchange:
-            ui.render_accepted()
-            self.assertEqual(1, self.fake.query_params.clear_count)
+        def exchange_after_clear(*_args):
             self.assertEqual({}, self.fake.query_params)
-            exchange.assert_not_called()
-            self.fake.supplied = 'x' * 40
-            self.fake.confirmed = True
-            self.fake.clicked.add('Sandbox Tokenを取得')
-            with self.assertRaises(RerunSignal):
-                ui.render_accepted()
+            return fixture_tokens()
+
+        with patch.object(SandboxHTTP, 'exchange_authorization_code', side_effect=exchange_after_clear) as exchange:
+            with patch.object(self.registry, 'exchange', wraps=self.registry.exchange) as callback_exchange:
+                with (patch('sys.stdout', new_callable=io.StringIO) as stdout,
+                      patch('sys.stderr', new_callable=io.StringIO) as stderr):
+                    ui.render_accepted()
+                    self.assertEqual(1, self.fake.query_params.clear_count)
+                    callback_exchange.assert_called_once_with(state, 'fixture-code')
+                    ui.render_accepted()
+                    callback_exchange.assert_called_once()
             exchange.assert_called_once()
-            self.fake.clicked.clear()
-            ui.render_accepted()
             self.assertTrue(any(kwargs.get('type') == 'password' and
                                 kwargs.get('value') == 'fixture-refresh' for _, kwargs in self.fake.inputs))
             screen = '\n'.join(self.fake.screen)
             for secret in ('fixture-code', 'fixture-refresh', 'fixture-access', 'fixture-secret', state):
                 self.assertNotIn(secret, screen)
+                self.assertNotIn(secret, stdout.getvalue())
+                self.assertNotIn(secret, stderr.getvalue())
 
     def test_declined_and_missing_code_never_connect_or_exchange(self):
         with patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange:
@@ -200,6 +191,28 @@ class CallbackPageTests(unittest.TestCase):
         self.assertEqual(1, self.fake.query_params.clear_count)
         self.assertEqual('', stderr.getvalue())
         self.assertNotIn('fixture-code', '\n'.join(self.fake.screen))
+
+    def test_callback_reload_with_old_code_cannot_exchange_again(self):
+        state = state_from(self.registry.begin(settings()))
+        with patch.object(SandboxHTTP, 'exchange_authorization_code', return_value=fixture_tokens()) as exchange:
+            self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
+            ui.render_accepted()
+            self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
+            ui.render_accepted()
+            exchange.assert_called_once()
+            self.assertNotIn('_sandbox_oauth_refresh', self.fake.session_state)
+
+    def test_timeout_does_not_retry_or_expose_details(self):
+        state = state_from(self.registry.begin(settings()))
+        self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
+        with patch.object(SandboxHTTP, 'exchange_authorization_code',
+                          side_effect=TimeoutError('fixture-secret')) as exchange:
+            ui.render_accepted()
+            self.assertEqual(1, self.fake.query_params.clear_count)
+            self.assertNotIn('fixture-secret', '\n'.join(self.fake.screen))
+            self.assertNotIn('fixture-code', '\n'.join(self.fake.screen))
+            ui.render_accepted()
+            exchange.assert_called_once()
 
     def test_public_or_production_configuration_fails_closed(self):
         with (patch.object(ui, 'execution_mode', return_value='PRODUCTION'),
