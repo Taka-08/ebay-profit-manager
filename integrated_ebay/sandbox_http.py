@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import base64
+from urllib.parse import urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 
@@ -31,6 +33,18 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class SandboxHTTP:
+    def exchange_authorization_code(self, settings, code):
+        # This capability has one fixed endpoint, independent of Inventory API flags.
+        from .sandbox_oauth import validate_settings, validate_code
+        validate_settings(settings)
+        validate_code(code)
+        auth = base64.b64encode((settings.client_id + ':' + settings.client_secret).encode()).decode()
+        return self._send('POST', '/identity/v1/oauth2/token', headers={
+            'Authorization': 'Basic ' + auth,
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }, body=urlencode({'grant_type': 'authorization_code', 'code': code,
+                           'redirect_uri': settings.redirect_name}).encode())
+
     def request(self, method, path, *, token='', body=None, headers=None, write=False):
         sandbox_guard()
         allowed = ((method == 'GET' and re.fullmatch(r'/sell/inventory/v1/(offer(?:\?sku=[^#]+|/[0-9]+)|inventory_item/[^/?#]+)', path))
@@ -49,8 +63,11 @@ class SandboxHTTP:
         if isinstance(body, dict):
             body = json.dumps(body, allow_nan=False).encode('utf-8')
             hdr['Content-Type'] = 'application/json'
+        return self._send(method, path, body=body, headers=hdr, write=write)
+
+    def _send(self, method, path, *, body=None, headers=None, write=False):
         try:
-            request = Request('https://api.sandbox.ebay.com' + path, data=body, headers=hdr, method=method)
+            request = Request('https://api.sandbox.ebay.com' + path, data=body, headers=headers or {}, method=method)
             # Environment proxies and redirects must not move tokens to another host.
             with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=20) as response:
                 raw = response.read(2_000_001)

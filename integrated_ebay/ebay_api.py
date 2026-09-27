@@ -59,6 +59,11 @@ class OAuthClient:
     def authorize(self):
         raise PublicationError('DISABLED', 'OAuth認証は未有効です。別途承認が必要です。')
 
+    def begin_sandbox_authorization(self):
+        """Prepare a separate, OAuth-only consent flow; never enable listing APIs."""
+        from .sandbox_oauth import SandboxConsent
+        return SandboxConsent(self._settings)
+
     def refresh_access_token(self):
         import base64
         from urllib.parse import urlencode
