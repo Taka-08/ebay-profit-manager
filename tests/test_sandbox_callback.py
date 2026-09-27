@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import io
+import os
 import sqlite3
 import time
 import unittest
@@ -47,6 +48,7 @@ class FakeStreamlit:
     def __init__(self, query=None):
         self.query_params = QueryParams(query)
         self.session_state = {}
+        self.secrets = {}
         self.screen = []
         self.inputs = []
         self.clicked = set()
@@ -172,6 +174,103 @@ class CallbackPageTests(unittest.TestCase):
                 self.assertNotIn(secret, screen)
                 self.assertNotIn(secret, stdout.getvalue())
                 self.assertNotIn(secret, stderr.getvalue())
+
+    def test_start_diagnostics_identify_failure_without_exposing_values_or_dispatching(self):
+        marker_values = {
+            'EBAY_SANDBOX_CLIENT_ID': 'private-client-marker',
+            'EBAY_SANDBOX_CLIENT_SECRET': 'private-secret-marker',
+            'EBAY_SANDBOX_REDIRECT_NAME': 'private-runame-marker',
+            'EBAY_SANDBOX_SCOPES': REQUIRED_SCOPES[0],
+            'EBAY_SANDBOX_OAUTH_SETUP_KEY': 'private-short-key',
+            'EBAY_ENABLE_PRODUCTION_WRITES': 'true',
+            'EBAY_EXECUTION_MODE': 'PRODUCTION',
+        }
+        self.fake.secrets = {'ebay': marker_values}
+        with (patch.dict(os.environ, {}, clear=True),
+              patch.object(ui, '_setup_key', side_effect=OAuthSetupError('private-exception-marker')),
+              patch.object(self.registry, 'begin') as begin,
+              patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange,
+              patch('sys.stdout', new_callable=io.StringIO) as stdout,
+              patch('sys.stderr', new_callable=io.StringIO) as stderr):
+            ui.render_start()
+        screen = '\n'.join(self.fake.screen)
+        self.assertIn('EBAY_SANDBOX_CLIENT_ID: loaded=OK, format=OK, source=[ebay]', screen)
+        self.assertIn('EBAY_SANDBOX_CLIENT_SECRET: loaded=OK, format=OK, source=[ebay]', screen)
+        self.assertIn('EBAY_SANDBOX_REDIRECT_NAME: loaded=OK, format=OK, source=[ebay]', screen)
+        self.assertIn('missing required scope: ' + REQUIRED_SCOPES[1], screen)
+        self.assertIn('minimum 32 characters=NG - too short', screen)
+        self.assertIn('EXECUTION_MODE: NG - Production mode', screen)
+        self.assertIn('PRODUCTION_WRITE_GUARD: NG - writes not disabled', screen)
+        for secret in (marker_values['EBAY_SANDBOX_CLIENT_ID'],
+                       marker_values['EBAY_SANDBOX_CLIENT_SECRET'],
+                       marker_values['EBAY_SANDBOX_REDIRECT_NAME'],
+                       marker_values['EBAY_SANDBOX_OAUTH_SETUP_KEY'],
+                       'private-exception-marker'):
+            self.assertNotIn(secret, screen)
+            self.assertNotIn(secret, stdout.getvalue())
+            self.assertNotIn(secret, stderr.getvalue())
+        self.assertFalse(self.fake.inputs)
+        begin.assert_not_called()
+        exchange.assert_not_called()
+
+    def test_diagnostic_sources_and_matching_settings(self):
+        self.fake.secrets = {
+            'ebay': {
+                'EBAY_SANDBOX_CLIENT_ID': 'shadowed-client',
+                'EBAY_SANDBOX_CLIENT_SECRET': 'section-secret',
+                'EBAY_SANDBOX_SCOPES': ' '.join(REQUIRED_SCOPES),
+                'EBAY_SANDBOX_OAUTH_SETUP_KEY': 'k' * 32,
+            },
+            'EBAY_SANDBOX_REDIRECT_NAME': 'root-runame',
+        }
+        with patch.dict(os.environ, {'EBAY_SANDBOX_CLIENT_ID': 'environment-client'}, clear=True):
+            lines = ui._configuration_diagnostics()
+        screen = '\n'.join(lines)
+        self.assertIn('EBAY_SANDBOX_CLIENT_ID: loaded=OK, format=OK, source=environment', screen)
+        self.assertIn('EBAY_SANDBOX_CLIENT_SECRET: loaded=OK, format=OK, source=[ebay]', screen)
+        self.assertIn('EBAY_SANDBOX_REDIRECT_NAME: loaded=OK, format=OK, source=top-level', screen)
+        self.assertIn('EBAY_SANDBOX_SCOPES: loaded=OK, required scopes=OK, source=[ebay]', screen)
+        self.assertIn('minimum 32 characters=OK, source=[ebay]', screen)
+        self.assertIn('EXECUTION_MODE: OK - Sandbox OAuth allowed, source=missing', screen)
+        self.assertIn('PRODUCTION_WRITE_GUARD: OK - writes disabled, source=missing', screen)
+        for secret in ('shadowed-client', 'section-secret', 'root-runame', 'environment-client', 'k' * 32):
+            self.assertNotIn(secret, screen)
+
+    def test_diagnostics_respect_empty_section_shadow_and_code_format(self):
+        self.fake.secrets = {'ebay': {'EBAY_SANDBOX_CLIENT_ID': ''},
+                             'EBAY_SANDBOX_CLIENT_ID': 'root-client'}
+        with patch.dict(os.environ, {'EBAY_EXECUTION_MODE': 'invalid-mode',
+                                     'EBAY_ENABLE_PRODUCTION_WRITES': '0'}, clear=True):
+            screen = '\n'.join(ui._configuration_diagnostics())
+        self.assertIn('EBAY_SANDBOX_CLIENT_ID: loaded=NG, format=NG - not loaded, source=[ebay]', screen)
+        self.assertIn('EXECUTION_MODE: NG - unsupported mode, source=environment', screen)
+        self.assertIn('PRODUCTION_WRITE_GUARD: NG - writes not disabled, source=environment', screen)
+        self.assertNotIn('root-client', screen)
+
+    def test_diagnostics_identify_each_format_problem_without_values(self):
+        self.fake.secrets = {'ebay': {
+            'EBAY_SANDBOX_CLIENT_ID': 'private:client',
+            'EBAY_SANDBOX_CLIENT_SECRET': 'private\nsecret',
+            'EBAY_SANDBOX_REDIRECT_NAME': 'r' * 4097,
+            'EBAY_SANDBOX_SCOPES': ' '.join(REQUIRED_SCOPES) + ' unexpected-scope',
+            'EBAY_SANDBOX_OAUTH_SETUP_KEY': 'k' * 32,
+        }}
+        with patch.dict(os.environ, {}, clear=True):
+            screen = '\n'.join(ui._configuration_diagnostics())
+        self.assertIn('EBAY_SANDBOX_CLIENT_ID: loaded=OK, format=NG - contains a colon', screen)
+        self.assertIn('EBAY_SANDBOX_CLIENT_SECRET: loaded=OK, format=NG - contains a control character', screen)
+        self.assertIn('EBAY_SANDBOX_REDIRECT_NAME: loaded=OK, format=NG - exceeds 4096 characters', screen)
+        self.assertIn('EBAY_SANDBOX_SCOPES: loaded=OK, required scopes=NG - unexpected scope configured', screen)
+        for secret in ('private:client', 'private\nsecret', 'r' * 4097, 'unexpected-scope', 'k' * 32):
+            self.assertNotIn(secret, screen)
+
+    def test_valid_start_does_not_display_diagnostics_or_start_consent(self):
+        with (patch.object(ui.OAuthSettings, 'load', return_value=settings()),
+              patch.object(self.registry, 'begin') as begin):
+            ui.render_start()
+        self.assertEqual(['eBay Sandbox OAuth'], self.fake.screen)
+        self.assertEqual('セットアップキー', self.fake.inputs[0][0])
+        begin.assert_not_called()
 
     def test_declined_and_missing_code_never_connect_or_exchange(self):
         with patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange:

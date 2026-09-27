@@ -1,13 +1,14 @@
 """Sandbox-only OAuth pages; never import or initialize a listing database here."""
 
 import hmac
+import os
 import time
 
 import streamlit as st
 
-from .ebay_api import OAuthSettings, execution_mode
+from .ebay_api import MODES, OAuthSettings, execution_mode
 from .sandbox_callback import sandbox_callback_registry
-from .sandbox_http import setting
+from .sandbox_http import REQUIRED_SCOPES, setting
 from .sandbox_oauth import OAuthSetupError, validate_settings
 
 
@@ -37,6 +38,74 @@ def _authorized(candidate):
     return isinstance(candidate, str) and hmac.compare_digest(candidate, expected)
 
 
+def _diagnostic_setting(name):
+    value = os.environ.get(name)
+    if value:
+        return value, "environment"
+    try:
+        section = st.secrets.get("ebay", {})
+        if hasattr(section, "get"):
+            value = section.get(name)
+            if value is not None:
+                return str(value).strip(), "[ebay]"
+        value = st.secrets.get(name)
+        if value is not None:
+            return str(value).strip(), "top-level"
+    except Exception:
+        pass
+    return "", "missing"
+
+
+def _text_problem(value):
+    if not value:
+        return "not loaded"
+    if len(value) > 4096:
+        return "exceeds 4096 characters"
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return "contains a control character"
+    return ""
+
+
+def _configuration_diagnostics():
+    lines = []
+    for name in ("CLIENT_ID", "CLIENT_SECRET", "REDIRECT_NAME"):
+        key = f"EBAY_SANDBOX_{name}"
+        value, source = _diagnostic_setting(key)
+        reason = _text_problem(value)
+        if name == "CLIENT_ID" and not reason and ":" in value:
+            reason = "contains a colon"
+        lines.append(f"{key}: loaded={'OK' if value else 'NG'}, "
+                     f"format={'NG - ' + reason if reason else 'OK'}, source={source}")
+
+    key = "EBAY_SANDBOX_SCOPES"
+    value, source = _diagnostic_setting(key)
+    configured = set(value.split())
+    required = set(REQUIRED_SCOPES)
+    missing = sorted(required - configured)
+    reason = ("missing required scope: " + ", ".join(missing) if missing else
+              "unexpected scope configured" if configured != required else "")
+    lines.append(f"{key}: loaded={'OK' if value else 'NG'}, "
+                 f"required scopes={'NG - ' + reason if reason else 'OK'}, source={source}")
+
+    key = "EBAY_SANDBOX_OAUTH_SETUP_KEY"
+    value, source = _diagnostic_setting(key)
+    lines.append(f"{key}: loaded={'OK' if value else 'NG'}, "
+                 f"minimum 32 characters={'OK' if len(value) >= 32 else 'NG - too short'}, "
+                 f"source={source}")
+
+    value, source = _diagnostic_setting("EBAY_EXECUTION_MODE")
+    mode = (value or "mock").upper()
+    reason = "unsupported mode" if mode not in MODES else "Production mode" if mode == "PRODUCTION" else ""
+    lines.append(f"EXECUTION_MODE: {'NG - ' + reason if reason else 'OK - Sandbox OAuth allowed'}, "
+                 f"source={source}")
+
+    value, source = _diagnostic_setting("EBAY_ENABLE_PRODUCTION_WRITES")
+    disabled = value.lower() in ("", "false")
+    lines.append(f"PRODUCTION_WRITE_GUARD: {'OK - writes disabled' if disabled else 'NG - writes not disabled'}, "
+                 f"source={source}")
+    return lines
+
+
 def render_start():
     st.title("eBay Sandbox OAuth")
     try:
@@ -44,6 +113,8 @@ def render_start():
         validate_settings(OAuthSettings.load("SANDBOX"))
     except (OAuthSetupError, ValueError):
         st.warning("Sandbox OAuthの設定が完了していません。")
+        for line in _configuration_diagnostics():
+            st.caption(line)
         return
 
     supplied = st.text_input("セットアップキー", type="password", autocomplete="off")
