@@ -1,0 +1,58 @@
+"""Process-local, fail-closed state for a one-time Sandbox OAuth callback."""
+
+from hashlib import sha256
+import hmac
+import threading
+import time
+from urllib.parse import parse_qs, urlsplit
+
+from .sandbox_oauth import OAuthSetupError, SandboxConsent, validate_code
+
+
+FLOW_LIFETIME_SECONDS = 600
+MAX_PENDING_FLOWS = 8
+
+
+class SandboxCallbackRegistry:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pending = {}
+        self._used_codes = {}
+
+    def _expire(self, now):
+        self._pending = {key: entry for key, entry in self._pending.items()
+                         if now - entry[1] <= FLOW_LIFETIME_SECONDS}
+        self._used_codes = {key: used_at for key, used_at in self._used_codes.items()
+                            if now - used_at <= FLOW_LIFETIME_SECONDS}
+
+    def begin(self, settings):
+        flow = SandboxConsent(settings)
+        url = flow.authorization_url
+        state = parse_qs(urlsplit(url).query)['state'][0]
+        with self._lock:
+            now = time.monotonic()
+            self._expire(now)
+            if len(self._pending) >= MAX_PENDING_FLOWS:
+                raise OAuthSetupError('Too many pending consent flows. Try again later.')
+            self._pending[state] = (flow, now)
+        return url
+
+    def exchange(self, state, code):
+        if not isinstance(state, str) or not 0 < len(state) <= 4096:
+            raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.')
+        validate_code(code)
+        digest = sha256(code.encode('utf-8')).digest()
+        with self._lock:
+            now = time.monotonic()
+            self._expire(now)
+            entry = self._pending.get(state)
+            if entry is None or not hmac.compare_digest(state, entry[0]._state):
+                raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.')
+            if digest in self._used_codes:
+                raise OAuthSetupError('This authorization code was already used.')
+            self._pending.pop(state)
+            self._used_codes[digest] = now
+        return entry[0].exchange_callback(state, code, confirmed=True)
+
+
+sandbox_callback_registry = SandboxCallbackRegistry()

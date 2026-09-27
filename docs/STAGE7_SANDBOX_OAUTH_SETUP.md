@@ -66,6 +66,59 @@ Sandbox execution service deliberately refuses a Turso-configured runtime, even
 if Sandbox credentials are stored. Obtaining a Refresh Token does not lift that
 guard or prepare a test Offer. Future listing tests need separate authorization
 and an isolated Sandbox execution environment; do not enable them in this task.
+
+## Existing Cloud app callback (Sandbox only)
+
+The listing manager registers three hidden, top-level pages before its normal
+`main()` / `init_db()` path. Use the verified existing listing-manager subdomain,
+not the profit calculator subdomain, for these URLs:
+
+- Accepted: `https://ebay-profit-manager-9nrrrcznpgcesspgdjcssj.streamlit.app/ebay-sandbox-accepted`
+- Declined: `https://ebay-profit-manager-9nrrrcznpgcesspgdjcssj.streamlit.app/ebay-sandbox-declined`
+- Initiation: `https://ebay-profit-manager-9nrrrcznpgcesspgdjcssj.streamlit.app/ebay-sandbox-start`
+
+Do not add `code`, `state`, credentials, or other query values to the registered
+URLs. Keep `EBAY_SANDBOX_REDIRECT_NAME` set to the Sandbox RuName, not the URL.
+Never use Streamlit's reserved `/oauth2callback` OIDC route for eBay OAuth.
+
+The Cloud flow remains disabled until the owner configures the four pre-consent
+Sandbox settings above (Client ID, Client Secret, RuName, scopes) and a random,
+at least 32-character
+`EBAY_SANDBOX_OAUTH_SETUP_KEY` in the listing-manager app's private `[ebay]`
+Secrets section. Keep the app in MOCK mode and Production writes disabled.
+The key protects initiation and one-time exchange even if the app is public;
+hidden navigation alone is not authentication. Do not put the key in a URL,
+source file, chat, log, or screenshot. No settings are changed by the callback.
+
+The owner starts on the initiation page, enters the setup key, and follows the
+Sandbox consent link. The server holds the random state and a copy of the
+Sandbox credentials in process memory for ten minutes; the configured values
+remain in private Cloud Secrets. Callback navigation creates a new
+Streamlit session, so the server checks the process-local state rather than
+relying on `st.session_state`. A restart or process mismatch loses the flow and
+fails closed. The accepted page removes query parameters before displaying
+controls, asks for the setup key and explicit exchange confirmation, and
+atomically consumes state and code before one request to the fixed Sandbox
+token endpoint. A lost/unknown result is never resent. Declined callbacks
+never exchange. Neither callback calls the listing database or migrations.
+
+On successful exchange, the access token is discarded; the refresh token is
+placed in a masked password input for the owner to copy into the intended
+private Streamlit Secrets editor. Server-side session state clears after two
+minutes on the next rerun, but an already-rendered browser field may remain
+until the page is refreshed or closed. The token is not printed, logged by
+application code, or stored in a file or database. The owner must use a
+trusted browser with clipboard history/sync and untrusted extensions disabled,
+then select "受け渡しを終了" and close the tab. Masking does not keep a token
+out of the owner's browser memory, WebSocket traffic, clipboard, or browser
+developer tools. The existing PC-only helper remains available and avoids
+sending the refresh token through Cloud UI at all.
+
+An OAuth authorization code necessarily appears briefly in the redirected
+browser URL before `st.query_params.clear()`. App code does not log it, but
+Streamlit Community Cloud ingress/access-log behavior is not controlled or
+guaranteed by this repository. Verify the app's public/private redirect behavior
+and callback routing before registering these URLs or starting live consent.
 If no approved secure destination is ready, do not start consent yet: memory-only
 results will be lost on helper shutdown and must be obtained again.
 

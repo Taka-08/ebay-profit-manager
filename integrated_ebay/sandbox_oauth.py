@@ -60,13 +60,7 @@ class SandboxConsent:
         })
 
     def exchange(self, response_url, *, confirmed=False):
-        if confirmed is not True:
-            raise OAuthSetupError('Explicit Sandbox token exchange confirmation is required.')
-        # Consume before dispatch: even a timeout must never cause an automatic retry.
-        with self._lock:
-            if self._used or time.monotonic() - self._started > 600:
-                raise OAuthSetupError('This consent flow is used or expired. Start a new flow.')
-            self._used = True
+        self._consume(confirmed)
         try:
             if not _text(response_url, 65536):
                 raise ValueError()
@@ -83,6 +77,29 @@ class SandboxConsent:
             validate_code(code)
         except Exception:
             raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.') from None
+        return self._exchange_code(code)
+
+    def exchange_callback(self, state, code, *, confirmed=False):
+        """Accept already-decoded Streamlit query values without reconstructing a URL."""
+        self._consume(confirmed)
+        if not _text(state, 4096) or not hmac.compare_digest(state, self._state):
+            raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.')
+        try:
+            validate_code(code)
+        except OAuthSetupError:
+            raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.') from None
+        return self._exchange_code(code)
+
+    def _consume(self, confirmed):
+        if confirmed is not True:
+            raise OAuthSetupError('Explicit Sandbox token exchange confirmation is required.')
+        # Consume before dispatch: even a timeout must never cause an automatic retry.
+        with self._lock:
+            if self._used or time.monotonic() - self._started > 600:
+                raise OAuthSetupError('This consent flow is used or expired. Start a new flow.')
+            self._used = True
+
+    def _exchange_code(self, code):
         try:
             result = SandboxHTTP().exchange_authorization_code(self._settings, code)
             if (not isinstance(result, dict)

@@ -5211,5 +5211,20 @@ def main() -> None:
         render_variance_analytics(rows)
 
 
+def run_app() -> None:
+    from integrated_ebay.sandbox_callback_ui import (
+        ACCEPTED_PATH, DECLINED_PATH, START_PATH,
+        render_accepted, render_declined, render_start,
+    )
+
+    page = st.navigation([
+        st.Page(main, title="出品管理", default=True),
+        st.Page(render_start, title="Sandbox OAuth開始", url_path=START_PATH),
+        st.Page(render_accepted, title="Sandbox OAuth承認", url_path=ACCEPTED_PATH),
+        st.Page(render_declined, title="Sandbox OAuth拒否", url_path=DECLINED_PATH),
+    ], position="hidden")
+    page.run()
+
+
 if __name__ == "__main__":
-    main()
+    run_app()
