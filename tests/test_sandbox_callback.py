@@ -275,6 +275,70 @@ class CallbackPageTests(unittest.TestCase):
         self.assertEqual('セットアップキー', self.fake.inputs[0][0])
         begin.assert_not_called()
 
+    def test_prepared_request_shows_only_statuses_before_link_without_network(self):
+        config = settings()
+        sources = {
+            'EBAY_SANDBOX_CLIENT_ID': (config.client_id, 'environment'),
+            'EBAY_SANDBOX_REDIRECT_NAME': (config.redirect_name, '[ebay]'),
+            'EBAY_SANDBOX_SCOPES': (' '.join(config.scopes), 'top-level'),
+        }
+        self.fake.clicked.add('Sandbox同意リンクを準備')
+        self.fake.supplied = 'x' * 40
+        with (patch.object(ui.OAuthSettings, 'load', return_value=config),
+              patch.object(ui, '_diagnostic_setting', side_effect=sources.get),
+              patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange,
+              patch('sys.stdout', new_callable=io.StringIO) as stdout,
+              patch('sys.stderr', new_callable=io.StringIO) as stderr):
+            ui.render_start()
+        screen = '\n'.join(self.fake.screen)
+        self.assertIn('Authorization request overall: VALID', screen)
+        self.assertIn('Client ID source: environment', screen)
+        self.assertIn('redirect_uri source: [ebay]', screen)
+        self.assertIn('scope source: top-level', screen)
+        self.assertIn('eBay Sandboxで同意する', screen)
+        url = self.fake.session_state['_sandbox_oauth_consent_url']
+        state = state_from(url)
+        for forbidden in (config.client_id, config.client_secret, config.redirect_name,
+                          self.fake.supplied, state, url):
+            self.assertNotIn(forbidden, screen)
+            self.assertNotIn(forbidden, stdout.getvalue())
+            self.assertNotIn(forbidden, stderr.getvalue())
+        exchange.assert_not_called()
+
+    def test_stale_request_mismatch_hides_link(self):
+        self.fake.session_state['_sandbox_oauth_consent_url'] = self.registry.begin(settings())
+        current = OAuthSettings('SANDBOX', client_id='changed-client', client_secret='fixture-secret',
+                                redirect_name='fixture-runame', scopes=REQUIRED_SCOPES)
+        sources = {
+            'EBAY_SANDBOX_CLIENT_ID': (current.client_id, 'environment'),
+            'EBAY_SANDBOX_REDIRECT_NAME': (current.redirect_name, '[ebay]'),
+            'EBAY_SANDBOX_SCOPES': (' '.join(current.scopes), '[ebay]'),
+        }
+        with (patch.object(ui.OAuthSettings, 'load', return_value=current),
+              patch.object(ui, '_diagnostic_setting', side_effect=sources.get)):
+            ui.render_start()
+        screen = '\n'.join(self.fake.screen)
+        self.assertIn('Client ID match: MISMATCH', screen)
+        self.assertIn('Authorization request overall: INVALID', screen)
+        self.assertNotIn('eBay Sandboxで同意する', screen)
+        self.assertNotIn('_sandbox_oauth_consent_url', self.fake.session_state)
+
+    def test_unknown_runtime_source_hides_link(self):
+        config = settings()
+        self.fake.session_state['_sandbox_oauth_consent_url'] = self.registry.begin(config)
+        sources = {
+            'EBAY_SANDBOX_CLIENT_ID': ('different-client', 'environment'),
+            'EBAY_SANDBOX_REDIRECT_NAME': (config.redirect_name, '[ebay]'),
+            'EBAY_SANDBOX_SCOPES': (' '.join(config.scopes), '[ebay]'),
+        }
+        with (patch.object(ui.OAuthSettings, 'load', return_value=config),
+              patch.object(ui, '_diagnostic_setting', side_effect=sources.get)):
+            ui.render_start()
+        screen = '\n'.join(self.fake.screen)
+        self.assertIn('Client ID source: UNKNOWN', screen)
+        self.assertIn('Authorization request overall: INVALID', screen)
+        self.assertNotIn('eBay Sandboxで同意する', screen)
+
     def test_declined_and_missing_code_never_connect_or_exchange(self):
         with patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange:
             self.fake.query_params = QueryParams({'state': ['fixture-state']})

@@ -2,10 +2,11 @@
 
 from dataclasses import dataclass, field
 import hmac
+import re
 import secrets
 import threading
 import time
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
 from .sandbox_http import REQUIRED_SCOPES, SandboxHTTP
 from .sandbox_oauth_diagnostics import current_status, mark
@@ -32,6 +33,90 @@ def validate_settings(settings):
 def validate_code(code):
     if not _text(code, 32768):
         raise OAuthSetupError('The authorization response is invalid. Start a new consent flow.')
+
+
+def authorization_request_diagnostics(url, settings):
+    """Return fixed statuses only; never return request values or the URL."""
+    result = {
+        'environment': 'SANDBOX' if settings.environment == 'SANDBOX' else 'OTHER',
+        'endpoint': 'OTHER',
+        'client_id': 'MISSING', 'client_id_match': 'MISMATCH',
+        'client_id_format': 'INVALID',
+        'redirect_uri': 'MISSING', 'redirect_uri_type': 'UNKNOWN',
+        'redirect_uri_match': 'MISMATCH',
+        'scope_required': 'NO', 'scope_unexpected': 'NO', 'scope_match': 'MISMATCH',
+        'response_type': 'OTHER', 'state': 'MISSING', 'prompt': 'NONE',
+        'duplicate_parameters': 'NO', 'double_encoding': 'NO',
+        'overall': 'INVALID',
+    }
+    if not isinstance(url, str) or len(url) > 65536:
+        return result
+    try:
+        parsed = urlsplit(url)
+        fields = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True,
+                           errors='strict', max_num_fields=20)
+    except (ValueError, UnicodeError):
+        return result
+
+    result['endpoint'] = ('SANDBOX' if parsed.scheme == 'https'
+                          and parsed.netloc == 'auth.sandbox.ebay.com'
+                          and parsed.path == '/oauth2/authorize' and not parsed.fragment
+                          else 'OTHER')
+    values = {}
+    for key, value in fields:
+        values.setdefault(key, []).append(value)
+    result['duplicate_parameters'] = ('YES' if any(len(items) != 1 for items in values.values())
+                                      else 'NO')
+    result['double_encoding'] = ('YES' if any(re.search(r'%[0-9a-fA-F]{2}', value)
+                                              for _, value in fields) else 'NO')
+
+    def single(name):
+        items = values.get(name, ())
+        return items[0] if len(items) == 1 else ''
+
+    client_id = single('client_id')
+    redirect_uri = single('redirect_uri')
+    scope = single('scope')
+    state = single('state')
+    prompt = single('prompt')
+    scope_parts = scope.split()
+    required = set(REQUIRED_SCOPES)
+    result['client_id'] = 'PRESENT' if client_id else 'MISSING'
+    result['client_id_match'] = 'MATCH' if client_id and client_id == settings.client_id else 'MISMATCH'
+    result['client_id_format'] = ('VALID' if client_id and client_id == client_id.strip()
+                                  and not any(char.isspace() for char in client_id)
+                                  and ':' not in client_id else 'INVALID')
+    result['redirect_uri'] = 'PRESENT' if redirect_uri else 'MISSING'
+    if redirect_uri.startswith(('https://', 'http://')):
+        result['redirect_uri_type'] = 'URL'
+    elif re.fullmatch(r'[A-Za-z0-9_.~-]+', redirect_uri):
+        result['redirect_uri_type'] = 'RUNAME'
+    result['redirect_uri_match'] = ('MATCH' if redirect_uri and redirect_uri == settings.redirect_name
+                                    else 'MISMATCH')
+    result['scope_required'] = 'YES' if required.issubset(scope_parts) else 'NO'
+    result['scope_unexpected'] = 'YES' if set(scope_parts) - required else 'NO'
+    result['scope_match'] = ('MATCH' if len(scope_parts) == len(settings.scopes)
+                             and set(scope_parts) == set(settings.scopes) else 'MISMATCH')
+    result['response_type'] = 'CODE' if single('response_type') == 'code' else 'OTHER'
+    result['state'] = 'PRESENT' if state else 'MISSING'
+    result['prompt'] = 'LOGIN' if prompt == 'login' else 'OTHER' if prompt else 'NONE'
+    expected_keys = {'client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'prompt'}
+    if (result['environment'] == result['endpoint'] == 'SANDBOX'
+            and result['client_id_match'] == result['redirect_uri_match'] == result['scope_match'] == 'MATCH'
+            and result['client_id_format'] == 'VALID'
+            and result['redirect_uri_type'] == 'RUNAME'
+            and result['scope_required'] == 'YES' and result['scope_unexpected'] == 'NO'
+            and len(scope_parts) == len(settings.scopes) == len(REQUIRED_SCOPES)
+            and set(settings.scopes) == required
+            and result['response_type'] == 'CODE'
+            and result['state'] == 'PRESENT' and len(state) <= 128
+            and re.fullmatch(r'[A-Za-z0-9_-]+', state)
+            and result['prompt'] in ('LOGIN', 'NONE')
+            and result['duplicate_parameters'] == result['double_encoding'] == 'NO'
+            and set(values).issubset(expected_keys)
+            and not re.search(r'%(?![0-9a-fA-F]{2})', parsed.query)):
+        result['overall'] = 'VALID'
+    return result
 
 
 @dataclass(frozen=True)

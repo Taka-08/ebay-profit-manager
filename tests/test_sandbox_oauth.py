@@ -9,12 +9,12 @@ import threading
 import unittest
 from unittest.mock import patch, MagicMock
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from integrated_ebay.ebay_api import OAuthClient, OAuthSettings, ProductionEbayProvider
 from integrated_ebay.publication_provider import PublicationError
 from integrated_ebay.sandbox_http import REQUIRED_SCOPES, SandboxHTTP, NoRedirect
-from integrated_ebay.sandbox_oauth import SandboxConsent, OAuthSetupError
+from integrated_ebay.sandbox_oauth import SandboxConsent, OAuthSetupError, authorization_request_diagnostics
 from scripts.sandbox_oauth_setup import SetupServer, PrivateClipboard
 
 
@@ -34,6 +34,58 @@ def callback(flow, code='fixture-code%2B+/#'):
 
 
 class ConsentTests(unittest.TestCase):
+    def test_authorization_request_preflight_accepts_only_current_sandbox_request(self):
+        config = settings()
+        url = SandboxConsent(config).authorization_url
+        report = authorization_request_diagnostics(url, config)
+        self.assertEqual('VALID', report['overall'])
+        self.assertEqual('SANDBOX', report['endpoint'])
+        self.assertEqual('MATCH', report['client_id_match'])
+        self.assertEqual('RUNAME', report['redirect_uri_type'])
+        self.assertEqual('MATCH', report['redirect_uri_match'])
+        self.assertEqual('YES', report['scope_required'])
+        self.assertEqual('NO', report['scope_unexpected'])
+        self.assertEqual('NO', report['duplicate_parameters'])
+        self.assertEqual('NO', report['double_encoding'])
+
+    def test_authorization_request_preflight_rejects_mismatches_and_malformed_requests(self):
+        config = settings()
+        url = SandboxConsent(config).authorization_url
+        parts = urlsplit(url)
+        original = dict(parse_qsl(parts.query))
+
+        def changed(**fields):
+            return urlunsplit(parts._replace(query=urlencode({**original, **fields})))
+
+        cases = (
+            (changed(client_id='different-client'), 'client_id_match', 'MISMATCH'),
+            (changed(redirect_uri='different-runame'), 'redirect_uri_match', 'MISMATCH'),
+            (changed(scope=REQUIRED_SCOPES[0]), 'scope_required', 'NO'),
+            (changed(scope=' '.join(REQUIRED_SCOPES) + ' unexpected'), 'scope_unexpected', 'YES'),
+            (parts._replace(netloc='auth.ebay.com').geturl(), 'endpoint', 'OTHER'),
+            (changed(redirect_uri='https://example.invalid/accepted'), 'redirect_uri_type', 'URL'),
+            (url + '&client_id=another', 'duplicate_parameters', 'YES'),
+            (changed(redirect_uri='fixture%2Druname'), 'double_encoding', 'YES'),
+            (changed(state=''), 'state', 'MISSING'),
+        )
+        for request_url, key, expected in cases:
+            with self.subTest(check=key):
+                report = authorization_request_diagnostics(request_url, config)
+                self.assertEqual(expected, report[key])
+                self.assertEqual('INVALID', report['overall'])
+
+    def test_authorization_request_preflight_returns_statuses_without_logging_identifiers(self):
+        config = settings()
+        url = SandboxConsent(config).authorization_url
+        state = parse_qs(urlsplit(url).query)['state'][0]
+        with (patch('sys.stdout', new_callable=io.StringIO) as stdout,
+              patch('sys.stderr', new_callable=io.StringIO) as stderr):
+            report = authorization_request_diagnostics(url, config)
+        for forbidden in (config.client_id, config.client_secret, config.redirect_name, state, url):
+            self.assertNotIn(forbidden, repr(report))
+            self.assertNotIn(forbidden, stdout.getvalue())
+            self.assertNotIn(forbidden, stderr.getvalue())
+
     def test_prepare_has_no_network_and_correct_scope_and_state(self):
         with patch('integrated_ebay.sandbox_http.build_opener') as opener:
             flow = OAuthClient(settings()).begin_sandbox_authorization()

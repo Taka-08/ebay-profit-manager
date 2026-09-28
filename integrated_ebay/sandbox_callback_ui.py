@@ -9,7 +9,7 @@ import streamlit as st
 from .ebay_api import MODES, OAuthSettings, execution_mode
 from .sandbox_callback import sandbox_callback_registry
 from .sandbox_http import REQUIRED_SCOPES, setting
-from .sandbox_oauth import OAuthSetupError, validate_settings
+from .sandbox_oauth import OAuthSetupError, authorization_request_diagnostics, validate_settings
 from .sandbox_oauth_diagnostics import diagnostic_scope, mark, new_diagnostic, safe_lines
 
 
@@ -107,12 +107,28 @@ def _configuration_diagnostics():
     return lines
 
 
+def _request_sources(settings):
+    sources = {}
+    expected = {
+        'client_id': ('EBAY_SANDBOX_CLIENT_ID', settings.client_id),
+        'redirect_uri': ('EBAY_SANDBOX_REDIRECT_NAME', settings.redirect_name),
+        'scope': ('EBAY_SANDBOX_SCOPES', settings.scopes),
+    }
+    for label, (key, loaded) in expected.items():
+        value, source = _diagnostic_setting(key)
+        matches = tuple(value.split()) == loaded if label == 'scope' else value == loaded
+        sources[label] = source if matches and source in ('environment', '[ebay]', 'top-level') else 'UNKNOWN'
+    return sources
+
+
 def render_start():
     st.title("eBay Sandbox OAuth")
     try:
         _setup_key()
-        validate_settings(OAuthSettings.load("SANDBOX"))
+        settings = OAuthSettings.load("SANDBOX")
+        validate_settings(settings)
     except (OAuthSetupError, ValueError):
+        st.session_state.pop("_sandbox_oauth_consent_url", None)
         st.warning("Sandbox OAuthの設定が完了していません。")
         for line in _configuration_diagnostics():
             st.caption(line)
@@ -125,15 +141,46 @@ def render_start():
             return
         try:
             st.session_state.pop("_sandbox_oauth_diagnostics", None)
-            st.session_state["_sandbox_oauth_consent_url"] = sandbox_callback_registry.begin(
-                OAuthSettings.load("SANDBOX")
-            )
+            st.session_state["_sandbox_oauth_consent_url"] = sandbox_callback_registry.begin(settings)
         except OAuthSetupError:
             st.error("準備できませんでした。時間をおいてやり直してください。")
             return
     url = st.session_state.get("_sandbox_oauth_consent_url")
     if url:
-        st.link_button("eBay Sandboxで同意する", url)
+        current_settings = OAuthSettings.load("SANDBOX")
+        report = authorization_request_diagnostics(url, current_settings)
+        sources = _request_sources(current_settings)
+        st.caption("Authorization Request事前診断")
+        for label, key in (
+            ("Environment", "environment"),
+            ("Authorization endpoint", "endpoint"),
+            ("Client ID", "client_id"),
+            ("Client ID match", "client_id_match"),
+            ("Client ID format", "client_id_format"),
+            ("redirect_uri", "redirect_uri"),
+            ("redirect_uri type", "redirect_uri_type"),
+            ("redirect_uri match", "redirect_uri_match"),
+            ("scope required", "scope_required"),
+            ("scope unexpected", "scope_unexpected"),
+            ("scope match", "scope_match"),
+            ("response_type", "response_type"),
+            ("state", "state"),
+            ("prompt", "prompt"),
+            ("duplicate query parameters", "duplicate_parameters"),
+            ("double encoding", "double_encoding"),
+        ):
+            st.caption(f"{label}: {report[key]}")
+        st.caption(f"Client ID source: {sources['client_id']}")
+        st.caption(f"redirect_uri source: {sources['redirect_uri']}")
+        st.caption(f"scope source: {sources['scope']}")
+        if 'UNKNOWN' in sources.values():
+            report['overall'] = 'INVALID'
+        st.caption(f"Authorization request overall: {report['overall']}")
+        if report['overall'] == 'VALID':
+            st.link_button("eBay Sandboxで同意する", url)
+        else:
+            st.session_state.pop("_sandbox_oauth_consent_url", None)
+            st.warning("認可リクエストを確認できませんでした。リンクは使用できません。")
 
 
 def _capture_callback():
