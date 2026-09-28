@@ -5,11 +5,12 @@ import os
 import re
 import base64
 from urllib.parse import urlencode
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 
 from app_database import _secret_value
 from .publication_provider import PublicationError
+from .sandbox_oauth_diagnostics import mark
 
 BASE_SCOPE = 'https://api.ebay.com/oauth/api_scope'
 REQUIRED_SCOPES = (BASE_SCOPE, BASE_SCOPE + '/sell.inventory')
@@ -71,13 +72,21 @@ class SandboxHTTP:
             # Environment proxies and redirects must not move tokens to another host.
             with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=20) as response:
                 raw = response.read(2_000_001)
+                if path == '/identity/v1/oauth2/token':
+                    mark('token_exchange_http_status', '2xx')
                 if len(raw) > 2_000_000:
                     raise ValueError('Response too large')
                 return raw if path == '/ws/api.dll' else json.loads(raw) if raw else {}
         except HTTPError as exc:
+            if path == '/identity/v1/oauth2/token' and 400 <= exc.code < 600:
+                mark('token_exchange_http_status', '4xx' if exc.code < 500 else '5xx')
             code = 'AUTH_EXPIRED' if exc.code in (401, 403) else 'RATE_LIMIT' if exc.code == 429 else 'FAILED'
             # Even an error response after dispatch can follow a partial change.
             raise PublicationError(code, 'eBay APIが要求を拒否しました。詳細な応答は表示しません。', uncertain=write) from None
-        except Exception:
+        except Exception as exc:
+            if (path == '/identity/v1/oauth2/token'
+                    and (isinstance(exc, TimeoutError)
+                         or isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError))):
+                mark('token_exchange_http_status', 'TIMEOUT')
             raise PublicationError('UNKNOWN_RESULT' if write else 'READ_FAILED',
                 'eBay通信結果を確認できません。自動再送はしません。', uncertain=write) from None

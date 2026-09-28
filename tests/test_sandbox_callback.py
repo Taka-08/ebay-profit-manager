@@ -2,11 +2,13 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import io
+import json
 import os
 import sqlite3
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
 from ebay_listing_manager import streamlit_app as manager
@@ -15,6 +17,7 @@ from integrated_ebay.ebay_api import OAuthSettings
 from integrated_ebay.sandbox_callback import SandboxCallbackRegistry
 from integrated_ebay.sandbox_http import REQUIRED_SCOPES, SandboxHTTP
 from integrated_ebay.sandbox_oauth import OAuthSetupError
+from integrated_ebay.sandbox_oauth_diagnostics import diagnostic_scope, mark, new_diagnostic, safe_lines
 
 
 def settings():
@@ -380,3 +383,141 @@ class CallbackRoutingTests(unittest.TestCase):
                     manager.run_app()
                 exchange.assert_not_called()
                 self.assertEqual(1, fake.query_params.clear_count)
+
+
+class CallbackDiagnosticTests(unittest.TestCase):
+    setUp = CallbackPageTests.setUp
+
+    def test_missing_code_records_only_fixed_statuses(self):
+        self.fake.query_params = QueryParams({'state': ['fixture-state'], 'expires_in': ['299']})
+        with patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange:
+            ui.render_accepted()
+            exchange.assert_not_called()
+        diagnostic = self.fake.session_state['_sandbox_oauth_diagnostics'][-1]
+        self.assertEqual('YES', diagnostic['callback_reached'])
+        self.assertEqual('YES', diagnostic['state_received'])
+        self.assertEqual('NO', diagnostic['code_received'])
+        self.assertEqual('YES', diagnostic['query_cleared'])
+        self.assertEqual('NOT ATTEMPTED', diagnostic['token_exchange_http_status'])
+        self.assertNotIn('fixture-state', '\n'.join(self.fake.screen))
+
+    def test_lost_or_expired_process_state_never_exchanges(self):
+        state = state_from(self.registry.begin(settings()))
+        self.registry._pending.clear()
+        self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
+        with patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange:
+            ui.render_accepted()
+            exchange.assert_not_called()
+        diagnostic = self.fake.session_state['_sandbox_oauth_diagnostics'][-1]
+        self.assertEqual('NO', diagnostic['stored_state_found'])
+        self.assertEqual('NOT CHECKED', diagnostic['state_matched'])
+        self.assertEqual('UNKNOWN', diagnostic['same_cloud_process'])
+        self.assertEqual('NO', diagnostic['token_exchange_attempted'])
+
+        state = state_from(self.registry.begin(settings()))
+        self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code-2']})
+        with (patch('integrated_ebay.sandbox_callback.time.monotonic',
+                    return_value=time.monotonic() + 601),
+              patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange):
+            ui.render_accepted()
+            exchange.assert_not_called()
+        diagnostic = self.fake.session_state['_sandbox_oauth_diagnostics'][-1]
+        self.assertEqual('YES', diagnostic['stored_state_found'])
+        self.assertEqual('YES', diagnostic['state_expired'])
+        self.assertEqual('SAME', diagnostic['same_cloud_process'])
+        self.assertEqual('NO', diagnostic['token_exchange_attempted'])
+
+    def test_success_and_replayed_callback_remain_distinguishable(self):
+        state = state_from(self.registry.begin(settings()))
+        query = {'state': [state], 'code': ['fixture-code']}
+        with patch.object(SandboxHTTP, 'exchange_authorization_code', return_value=fixture_tokens()) as exchange:
+            self.fake.query_params = QueryParams(query)
+            ui.render_accepted()
+            self.fake.query_params = QueryParams(query)
+            ui.render_accepted()
+            exchange.assert_called_once()
+        previous, latest = self.fake.session_state['_sandbox_oauth_diagnostics']
+        self.assertEqual('YES', previous['token_exchange_succeeded'])
+        self.assertEqual('YES', previous['refresh_token_received'])
+        self.assertEqual('YES', latest['callback_already_processed'])
+        self.assertEqual('YES', latest['rerun_detected_after_callback'])
+        self.assertEqual('SAME', latest['same_cloud_process'])
+        self.assertEqual('NO', latest['token_exchange_attempted'])
+        self.assertNotIn('fixture-code', '\n'.join(self.fake.screen))
+        self.assertNotIn(state, '\n'.join(self.fake.screen))
+
+    def test_http_categories_and_invalid_response_without_network(self):
+        cases = ((401, '4xx'), (503, '5xx'), (TimeoutError('fixture-secret'), 'TIMEOUT'),
+                 (None, '2xx'))
+        for failure, expected in cases:
+            with self.subTest(expected=expected):
+                self.fake.session_state.pop('_sandbox_oauth_diagnostics', None)
+                state = state_from(self.registry.begin(settings()))
+                self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code-' + expected]})
+                with patch('integrated_ebay.sandbox_http.build_opener') as opener:
+                    if isinstance(failure, int):
+                        opener.return_value.open.side_effect = HTTPError(
+                            'https://api.sandbox.ebay.com', failure, 'denied', {}, None)
+                    elif failure is not None:
+                        opener.return_value.open.side_effect = failure
+                    else:
+                        opener.return_value.open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                            dict(fixture_tokens(), refresh_token='N/A')).encode()
+                    with patch('sys.stdout', new_callable=io.StringIO) as stdout, patch(
+                            'sys.stderr', new_callable=io.StringIO) as stderr:
+                        ui.render_accepted()
+                    self.assertEqual('', stdout.getvalue())
+                    self.assertEqual('', stderr.getvalue())
+                    self.assertEqual(1, opener.return_value.open.call_count)
+                diagnostic = self.fake.session_state['_sandbox_oauth_diagnostics'][-1]
+                self.assertEqual('YES', diagnostic['token_exchange_attempted'])
+                self.assertEqual(expected, diagnostic['token_exchange_http_status'])
+                self.assertEqual('NO', diagnostic['token_exchange_succeeded'])
+                if expected == '2xx':
+                    self.assertEqual('NO', diagnostic['refresh_token_received'])
+                self.assertNotIn('fixture-secret', '\n'.join(self.fake.screen))
+
+    def test_http_success_records_complete_exchange_without_logging_values(self):
+        state = state_from(self.registry.begin(settings()))
+        self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
+        with patch('integrated_ebay.sandbox_http.build_opener') as opener:
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                fixture_tokens()).encode()
+            with patch('sys.stdout', new_callable=io.StringIO) as stdout, patch(
+                    'sys.stderr', new_callable=io.StringIO) as stderr:
+                ui.render_accepted()
+            self.assertEqual('', stdout.getvalue())
+            self.assertEqual('', stderr.getvalue())
+            self.assertEqual(1, opener.return_value.open.call_count)
+        diagnostic = self.fake.session_state['_sandbox_oauth_diagnostics'][-1]
+        self.assertEqual('YES', diagnostic['stored_state_found'])
+        self.assertEqual('YES', diagnostic['state_matched'])
+        self.assertEqual('NO', diagnostic['state_expired'])
+        self.assertEqual('2xx', diagnostic['token_exchange_http_status'])
+        self.assertEqual('YES', diagnostic['token_exchange_succeeded'])
+        self.assertEqual('YES', diagnostic['refresh_token_received'])
+        for value in ('fixture-secret', 'fixture-code', 'fixture-access', 'fixture-refresh', state):
+            self.assertNotIn(value, '\n'.join(self.fake.screen))
+
+    def test_rerun_and_secret_value_cannot_be_rendered_as_diagnostic(self):
+        state = state_from(self.registry.begin(settings()))
+        self.fake.query_params = QueryParams({'state': [state], 'code': ['fixture-code']})
+        with patch.object(SandboxHTTP, 'exchange_authorization_code', return_value=fixture_tokens()):
+            ui.render_accepted()
+        self.fake.query_params = QueryParams()
+        ui.render_accepted()
+        diagnostic = self.fake.session_state['_sandbox_oauth_diagnostics'][-1]
+        self.assertEqual('YES', diagnostic['rerun_detected_after_callback'])
+        poisoned = new_diagnostic()
+        poisoned['state_received'] = 'fixture-secret'
+        self.assertNotIn('fixture-secret', '\n'.join(safe_lines(poisoned)))
+
+    def test_concurrent_diagnostics_are_session_isolated(self):
+        first, second = new_diagnostic(), new_diagnostic()
+        def record(diagnostic, value):
+            with diagnostic_scope(diagnostic):
+                mark('code_received', value)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda pair: record(*pair), ((first, 'YES'), (second, 'NO'))))
+        self.assertEqual('YES', first['code_received'])
+        self.assertEqual('NO', second['code_received'])

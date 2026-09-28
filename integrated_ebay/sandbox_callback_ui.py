@@ -10,6 +10,7 @@ from .ebay_api import MODES, OAuthSettings, execution_mode
 from .sandbox_callback import sandbox_callback_registry
 from .sandbox_http import REQUIRED_SCOPES, setting
 from .sandbox_oauth import OAuthSetupError, validate_settings
+from .sandbox_oauth_diagnostics import diagnostic_scope, mark, new_diagnostic, safe_lines
 
 
 START_PATH = "ebay-sandbox-start"
@@ -123,6 +124,7 @@ def render_start():
             st.error("確認できませんでした。")
             return
         try:
+            st.session_state.pop("_sandbox_oauth_diagnostics", None)
             st.session_state["_sandbox_oauth_consent_url"] = sandbox_callback_registry.begin(
                 OAuthSettings.load("SANDBOX")
             )
@@ -135,25 +137,36 @@ def render_start():
 
 
 def _capture_callback():
-    params = st.query_params
-    states = params.get_all("state")
-    codes = params.get_all("code")
-    has_error = bool(params.get_all("error"))
-    _clear_sensitive_session()
-    valid = not has_error and len(states) == 1 and len(codes) == 1
-    if valid:
-        state, code = states[0], codes[0]
-        valid = bool(state and code and len(state) <= 4096 and len(code) <= 32768)
-    params.clear()
-    if not valid:
-        return False
-    try:
-        _setup_key()
-        result = sandbox_callback_registry.exchange(state, code)
-    except OAuthSetupError:
-        return False
-    st.session_state["_sandbox_oauth_refresh"] = (result.refresh_token, time.monotonic())
-    return True
+    history = st.session_state.setdefault("_sandbox_oauth_diagnostics", [])
+    diagnostic = new_diagnostic()
+    if history:
+        diagnostic["rerun_detected_after_callback"] = "YES"
+    history.append(diagnostic)
+    del history[:-2]
+    with diagnostic_scope(diagnostic):
+        mark("callback_reached", "YES")
+        params = st.query_params
+        states = params.get_all("state")
+        codes = params.get_all("code")
+        mark("state_received", "YES" if states else "NO")
+        mark("code_received", "YES" if codes else "NO")
+        has_error = bool(params.get_all("error"))
+        _clear_sensitive_session()
+        valid = not has_error and len(states) == 1 and len(codes) == 1
+        if valid:
+            state, code = states[0], codes[0]
+            valid = bool(state and code and len(state) <= 4096 and len(code) <= 32768)
+        params.clear()
+        mark("query_cleared", "YES")
+        if not valid:
+            return False
+        try:
+            _setup_key()
+            result = sandbox_callback_registry.exchange(state, code)
+        except OAuthSetupError:
+            return False
+        st.session_state["_sandbox_oauth_refresh"] = (result.refresh_token, time.monotonic())
+        return True
 
 
 def _clear_sensitive_session():
@@ -161,18 +174,36 @@ def _clear_sensitive_session():
         st.session_state.pop(key, None)
 
 
+def _show_callback_diagnostics():
+    history = st.session_state.get("_sandbox_oauth_diagnostics", [])
+    for index, diagnostic in enumerate(history):
+        st.caption("Sandbox callback diagnostics: " + ("previous" if index < len(history) - 1 else "latest"))
+        for line in safe_lines(diagnostic):
+            st.caption(line)
+
+
 def render_accepted():
     if st.query_params:
         if not _capture_callback():
             st.title("eBay Sandbox OAuth")
             st.error("同意結果を確認できませんでした。最初からやり直してください。")
+            _show_callback_diagnostics()
             return
+    else:
+        history = st.session_state.get("_sandbox_oauth_diagnostics", [])
+        if history:
+            history[-1]["rerun_detected_after_callback"] = "YES"
+        else:
+            diagnostic = new_diagnostic()
+            diagnostic["callback_reached"] = "YES"
+            st.session_state["_sandbox_oauth_diagnostics"] = [diagnostic]
     st.title("eBay Sandbox OAuth")
     try:
         _setup_key()
     except OAuthSetupError:
         _clear_sensitive_session()
         st.warning("Sandbox OAuthの設定が完了していません。")
+        _show_callback_diagnostics()
         return
 
     stored = st.session_state.get("_sandbox_oauth_refresh")
@@ -181,15 +212,18 @@ def render_accepted():
         if time.monotonic() - issued_at > TOKEN_HANDOFF_SECONDS:
             _clear_sensitive_session()
             st.warning("受け渡し時間が終了しました。最初からやり直してください。")
+            _show_callback_diagnostics()
             return
         st.success("Sandbox Refresh Tokenを取得しました。")
         st.text_input("Streamlit Secretsへ移すRefresh Token", value=token,
                       type="password", key="_sandbox_oauth_refresh_field", autocomplete="off")
         st.caption("この端末でコピーし、Secretsに保存したら直ちに終了してください。履歴・同期は無効にしてください。")
         st.button("受け渡しを終了", on_click=_clear_sensitive_session)
+        _show_callback_diagnostics()
         return
 
     st.warning("有効な同意結果がありません。最初からやり直してください。")
+    _show_callback_diagnostics()
 
 
 def render_declined():

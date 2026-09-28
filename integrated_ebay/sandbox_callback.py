@@ -7,6 +7,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from .sandbox_oauth import OAuthSetupError, SandboxConsent, validate_code
+from .sandbox_oauth_diagnostics import mark
 
 
 FLOW_LIFETIME_SECONDS = 600
@@ -44,8 +45,17 @@ class SandboxCallbackRegistry:
         digest = sha256(code.encode('utf-8')).digest()
         with self._lock:
             now = time.monotonic()
+            candidate = self._pending.get(state)
+            if candidate is not None:
+                mark('stored_state_found', 'YES')
+                mark('same_cloud_process', 'SAME')
+                mark('state_expired', 'YES' if now - candidate[1] > FLOW_LIFETIME_SECONDS else 'NO')
+                mark('state_matched', 'YES' if hmac.compare_digest(state, candidate[0]._state) else 'NO')
             self._expire(now)
             entry = self._pending.get(state)
+            if digest in self._used_codes:
+                mark('callback_already_processed', 'YES')
+                mark('same_cloud_process', 'SAME')
             if entry is None or not hmac.compare_digest(state, entry[0]._state):
                 raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.')
             if digest in self._used_codes:

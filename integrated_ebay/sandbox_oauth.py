@@ -8,6 +8,7 @@ import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from .sandbox_http import REQUIRED_SCOPES, SandboxHTTP
+from .sandbox_oauth_diagnostics import current_status, mark
 
 
 class OAuthSetupError(ValueError):
@@ -83,7 +84,9 @@ class SandboxConsent:
         """Accept already-decoded Streamlit query values without reconstructing a URL."""
         self._consume(confirmed)
         if not _text(state, 4096) or not hmac.compare_digest(state, self._state):
+            mark('state_matched', 'NO')
             raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.')
+        mark('state_matched', 'YES')
         try:
             validate_code(code)
         except OAuthSetupError:
@@ -96,12 +99,21 @@ class SandboxConsent:
         # Consume before dispatch: even a timeout must never cause an automatic retry.
         with self._lock:
             if self._used or time.monotonic() - self._started > 600:
+                if self._used:
+                    mark('callback_already_processed', 'YES')
+                else:
+                    mark('state_expired', 'YES')
                 raise OAuthSetupError('This consent flow is used or expired. Start a new flow.')
+            if current_status('state_expired') == 'NOT CHECKED':
+                mark('state_expired', 'NO')
             self._used = True
 
     def _exchange_code(self, code):
+        mark('token_exchange_attempted', 'YES')
         try:
             result = SandboxHTTP().exchange_authorization_code(self._settings, code)
+            refresh = result.get('refresh_token') if isinstance(result, dict) else None
+            mark('refresh_token_received', 'YES' if _text(refresh, 65536) and refresh != 'N/A' else 'NO')
             if (not isinstance(result, dict)
                     or not _text(result.get('access_token'), 65536)
                     or not _text(result.get('refresh_token'), 65536)
@@ -109,7 +121,11 @@ class SandboxConsent:
                     or any(type(result.get(k)) is not int or result[k] <= 0
                            for k in ('expires_in', 'refresh_token_expires_in'))):
                 raise ValueError()
+            mark('token_exchange_succeeded', 'YES')
             return OAuthTokens(result['access_token'], result['refresh_token'],
                                result['expires_in'], result['refresh_token_expires_in'])
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, TimeoutError) and current_status('token_exchange_http_status') == 'NOT ATTEMPTED':
+                mark('token_exchange_http_status', 'TIMEOUT')
+            mark('token_exchange_succeeded', 'NO')
             raise OAuthSetupError('Token exchange failed or its result is unknown. Do not resend; start a new consent flow.') from None

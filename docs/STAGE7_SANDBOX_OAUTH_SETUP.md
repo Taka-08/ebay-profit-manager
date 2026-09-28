@@ -126,6 +126,21 @@ and callback routing before registering these URLs or starting live consent.
 The Streamlit page cannot guarantee callback-specific `Cache-Control` or
 `Referrer-Policy` response headers on Community Cloud; use a private browser
 session without untrusted extensions for this Sandbox-only handoff.
+
+## Temporary callback diagnostics
+
+The accepted page displays fixed YES/NO/status categories for callback receipt,
+state lookup, one-time exchange, HTTP response class, and reruns. Only the two
+most recent diagnostic snapshots are kept in the current Streamlit session;
+the app does not write them to logs, files, or the database. No OAuth values,
+value fragments, lengths, or hashes are included in these diagnostics.
+`SAME` means the current process still has the pending state or used code;
+`UNKNOWN` cannot distinguish a restart from a different process, expiration,
+or an unknown state. A new browser session cannot be identified as a rerun.
+If exchange was attempted but no HTTP response was received for a reason other
+than a detected timeout, the HTTP-status field remains `NOT ATTEMPTED` while
+the separate attempted field reads `YES`. Remove this temporary diagnostic
+display after the callback failure has been identified.
 If no approved secure destination is ready, do not start consent yet: memory-only
 results will be lost on helper shutdown and must be obtained again.
 
