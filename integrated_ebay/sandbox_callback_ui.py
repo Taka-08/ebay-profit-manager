@@ -149,11 +149,17 @@ def render_start():
     if url:
         current_settings = OAuthSettings.load("SANDBOX")
         report = authorization_request_diagnostics(url, current_settings)
+        prepared = sandbox_callback_registry.prepared_request_diagnostics(url)
         sources = _request_sources(current_settings)
         st.caption("Authorization Request事前診断")
         for label, key in (
             ("Environment", "environment"),
             ("Authorization endpoint", "endpoint"),
+            ("Scheme", "scheme"),
+            ("Host", "host"),
+            ("Path", "path"),
+            ("Query parameter count", "parameter_count"),
+            ("Fragment", "fragment"),
             ("Client ID", "client_id"),
             ("Client ID match", "client_id_match"),
             ("Client ID format", "client_id_format"),
@@ -161,6 +167,7 @@ def render_start():
             ("redirect_uri type", "redirect_uri_type"),
             ("redirect_uri match", "redirect_uri_match"),
             ("scope required", "scope_required"),
+            ("scope", "scope"),
             ("scope unexpected", "scope_unexpected"),
             ("scope match", "scope_match"),
             ("response_type", "response_type"),
@@ -168,8 +175,11 @@ def render_start():
             ("prompt", "prompt"),
             ("duplicate query parameters", "duplicate_parameters"),
             ("double encoding", "double_encoding"),
+            ("encode/decode semantic roundtrip", "semantic_roundtrip"),
         ):
             st.caption(f"{label}: {report[key]}")
+        st.caption(f"state matches prepared flow: {prepared['state_match']}")
+        st.caption(f"URL matches prepared flow: {prepared['generated_url_match']}")
         st.caption(f"Client ID source: {sources['client_id']}")
         st.caption(f"redirect_uri source: {sources['redirect_uri']}")
         st.caption(f"scope source: {sources['scope']}")

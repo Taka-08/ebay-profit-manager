@@ -40,6 +40,18 @@ class ConsentTests(unittest.TestCase):
         report = authorization_request_diagnostics(url, config)
         self.assertEqual('VALID', report['overall'])
         self.assertEqual('SANDBOX', report['endpoint'])
+        self.assertEqual('HTTPS', report['scheme'])
+        self.assertEqual('EXPECTED_SANDBOX', report['host'])
+        self.assertEqual('EXPECTED_AUTHORIZE_PATH', report['path'])
+        self.assertEqual(6, report['parameter_count'])
+        self.assertEqual('ABSENT', report['fragment'])
+        self.assertEqual('PRESENT', report['client_id'])
+        self.assertEqual('PRESENT', report['redirect_uri'])
+        self.assertEqual('PRESENT', report['scope'])
+        self.assertEqual('PRESENT', report['state'])
+        self.assertEqual('CODE', report['response_type'])
+        self.assertEqual('LOGIN', report['prompt'])
+        self.assertEqual('YES', report['semantic_roundtrip'])
         self.assertEqual('MATCH', report['client_id_match'])
         self.assertEqual('RUNAME', report['redirect_uri_type'])
         self.assertEqual('MATCH', report['redirect_uri_match'])
@@ -67,6 +79,8 @@ class ConsentTests(unittest.TestCase):
             (url + '&client_id=another', 'duplicate_parameters', 'YES'),
             (changed(redirect_uri='fixture%2Druname'), 'double_encoding', 'YES'),
             (changed(state=''), 'state', 'MISSING'),
+            (url + '#fragment', 'fragment', 'PRESENT'),
+            (url.replace('scope=', 'scope=%2520'), 'semantic_roundtrip', 'NO'),
         )
         for request_url, key, expected in cases:
             with self.subTest(check=key):
@@ -85,6 +99,7 @@ class ConsentTests(unittest.TestCase):
             self.assertNotIn(forbidden, repr(report))
             self.assertNotIn(forbidden, stdout.getvalue())
             self.assertNotIn(forbidden, stderr.getvalue())
+        self.assertTrue(all(isinstance(value, (str, int)) for value in report.values()))
 
     def test_prepare_has_no_network_and_correct_scope_and_state(self):
         with patch('integrated_ebay.sandbox_http.build_opener') as opener:

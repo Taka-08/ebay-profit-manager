@@ -40,12 +40,15 @@ def authorization_request_diagnostics(url, settings):
     result = {
         'environment': 'SANDBOX' if settings.environment == 'SANDBOX' else 'OTHER',
         'endpoint': 'OTHER',
+        'scheme': 'OTHER', 'host': 'OTHER', 'path': 'OTHER',
+        'parameter_count': 0, 'fragment': 'ABSENT',
         'client_id': 'MISSING', 'client_id_match': 'MISMATCH',
         'client_id_format': 'INVALID',
         'redirect_uri': 'MISSING', 'redirect_uri_type': 'UNKNOWN',
         'redirect_uri_match': 'MISMATCH',
-        'scope_required': 'NO', 'scope_unexpected': 'NO', 'scope_match': 'MISMATCH',
-        'response_type': 'OTHER', 'state': 'MISSING', 'prompt': 'NONE',
+        'scope': 'MISSING', 'scope_required': 'NO', 'scope_unexpected': 'NO',
+        'scope_match': 'MISMATCH', 'semantic_roundtrip': 'NO',
+        'response_type': 'OTHER', 'state': 'MISSING', 'prompt': 'ABSENT',
         'duplicate_parameters': 'NO', 'double_encoding': 'NO',
         'overall': 'INVALID',
     }
@@ -58,6 +61,11 @@ def authorization_request_diagnostics(url, settings):
     except (ValueError, UnicodeError):
         return result
 
+    result['scheme'] = 'HTTPS' if parsed.scheme == 'https' else 'OTHER'
+    result['host'] = 'EXPECTED_SANDBOX' if parsed.netloc == 'auth.sandbox.ebay.com' else 'OTHER'
+    result['path'] = 'EXPECTED_AUTHORIZE_PATH' if parsed.path == '/oauth2/authorize' else 'OTHER'
+    result['parameter_count'] = len(fields)
+    result['fragment'] = 'PRESENT' if parsed.fragment else 'ABSENT'
     result['endpoint'] = ('SANDBOX' if parsed.scheme == 'https'
                           and parsed.netloc == 'auth.sandbox.ebay.com'
                           and parsed.path == '/oauth2/authorize' and not parsed.fragment
@@ -93,13 +101,18 @@ def authorization_request_diagnostics(url, settings):
         result['redirect_uri_type'] = 'RUNAME'
     result['redirect_uri_match'] = ('MATCH' if redirect_uri and redirect_uri == settings.redirect_name
                                     else 'MISMATCH')
+    result['scope'] = 'PRESENT' if scope else 'MISSING'
     result['scope_required'] = 'YES' if required.issubset(scope_parts) else 'NO'
     result['scope_unexpected'] = 'YES' if set(scope_parts) - required else 'NO'
     result['scope_match'] = ('MATCH' if len(scope_parts) == len(settings.scopes)
                              and set(scope_parts) == set(settings.scopes) else 'MISMATCH')
     result['response_type'] = 'CODE' if single('response_type') == 'code' else 'OTHER'
     result['state'] = 'PRESENT' if state else 'MISSING'
-    result['prompt'] = 'LOGIN' if prompt == 'login' else 'OTHER' if prompt else 'NONE'
+    result['prompt'] = 'LOGIN' if prompt == 'login' else 'OTHER' if prompt else 'ABSENT'
+    valid_escapes = not re.search(r'%(?![0-9a-fA-F]{2})', parsed.query)
+    if (valid_escapes and result['double_encoding'] == 'NO'
+            and parse_qsl(urlencode(fields), keep_blank_values=True, strict_parsing=True) == fields):
+        result['semantic_roundtrip'] = 'YES'
     expected_keys = {'client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'prompt'}
     if (result['environment'] == result['endpoint'] == 'SANDBOX'
             and result['client_id_match'] == result['redirect_uri_match'] == result['scope_match'] == 'MATCH'
@@ -111,10 +124,10 @@ def authorization_request_diagnostics(url, settings):
             and result['response_type'] == 'CODE'
             and result['state'] == 'PRESENT' and len(state) <= 128
             and re.fullmatch(r'[A-Za-z0-9_-]+', state)
-            and result['prompt'] in ('LOGIN', 'NONE')
+            and result['prompt'] in ('LOGIN', 'ABSENT')
             and result['duplicate_parameters'] == result['double_encoding'] == 'NO'
             and set(values).issubset(expected_keys)
-            and not re.search(r'%(?![0-9a-fA-F]{2})', parsed.query)):
+            and valid_escapes):
         result['overall'] = 'VALID'
     return result
 

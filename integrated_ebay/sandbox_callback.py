@@ -38,6 +38,28 @@ class SandboxCallbackRegistry:
             self._pending[state] = (flow, now)
         return url
 
+    def prepared_request_diagnostics(self, url):
+        result = {'state_match': 'MISMATCH', 'generated_url_match': 'MISMATCH'}
+        if not isinstance(url, str):
+            return result
+        try:
+            states = parse_qs(urlsplit(url).query, strict_parsing=True).get('state', ())
+        except ValueError:
+            return result
+        if len(states) != 1:
+            return result
+        state = states[0]
+        with self._lock:
+            entry = self._pending.get(state)
+            if entry is None or time.monotonic() - entry[1] > FLOW_LIFETIME_SECONDS:
+                return result
+            flow = entry[0]
+            if hmac.compare_digest(state, flow._state):
+                result['state_match'] = 'MATCH'
+                if hmac.compare_digest(url, flow.authorization_url):
+                    result['generated_url_match'] = 'MATCH'
+        return result
+
     def exchange(self, state, code):
         if not isinstance(state, str) or not 0 < len(state) <= 4096:
             raise OAuthSetupError('Consent response/state mismatch. Start a new consent flow.')

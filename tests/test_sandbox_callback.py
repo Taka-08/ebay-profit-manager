@@ -95,6 +95,23 @@ class CallbackRegistryTests(unittest.TestCase):
                 self.assertEqual([None, 'fixture-refresh'], sorted(pool.map(attempt, range(2)), key=str))
             exchange.assert_called_once()
 
+    def test_prepared_request_diagnostics_compare_generation_without_exposing_values(self):
+        registry = SandboxCallbackRegistry()
+        url = registry.begin(settings())
+        state = state_from(url)
+        same = registry.prepared_request_diagnostics(url)
+        self.assertEqual({'state_match': 'MATCH', 'generated_url_match': 'MATCH'}, same)
+        changed = registry.prepared_request_diagnostics(url + '&extra=fixture')
+        self.assertEqual({'state_match': 'MATCH', 'generated_url_match': 'MISMATCH'}, changed)
+        unknown = registry.prepared_request_diagnostics(url.replace(state, 'other-state'))
+        self.assertEqual({'state_match': 'MISMATCH', 'generated_url_match': 'MISMATCH'}, unknown)
+        with patch('integrated_ebay.sandbox_callback.time.monotonic', return_value=time.monotonic() + 601):
+            expired = registry.prepared_request_diagnostics(url)
+        self.assertEqual({'state_match': 'MISMATCH', 'generated_url_match': 'MISMATCH'}, expired)
+        for status in (same, changed, unknown, expired):
+            for forbidden in (settings().client_id, settings().redirect_name, state, url):
+                self.assertNotIn(forbidden, repr(status))
+
     def test_bad_or_expired_state_no_dispatch(self):
         registry = SandboxCallbackRegistry()
         url = registry.begin(settings())
@@ -285,8 +302,11 @@ class CallbackPageTests(unittest.TestCase):
         self.fake.clicked.add('Sandbox同意リンクを準備')
         self.fake.supplied = 'x' * 40
         with (patch.object(ui.OAuthSettings, 'load', return_value=config),
-              patch.object(ui, '_diagnostic_setting', side_effect=sources.get),
-              patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange,
+               patch.object(ui, '_diagnostic_setting', side_effect=sources.get),
+               patch.object(ui, 'authorization_request_diagnostics',
+                            wraps=ui.authorization_request_diagnostics) as diagnose,
+               patch.object(self.fake, 'link_button', wraps=self.fake.link_button) as link,
+               patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange,
               patch('sys.stdout', new_callable=io.StringIO) as stdout,
               patch('sys.stderr', new_callable=io.StringIO) as stderr):
             ui.render_start()
@@ -296,6 +316,14 @@ class CallbackPageTests(unittest.TestCase):
         self.assertIn('redirect_uri source: [ebay]', screen)
         self.assertIn('scope source: top-level', screen)
         self.assertIn('eBay Sandboxで同意する', screen)
+        self.assertIn('Scheme: HTTPS', screen)
+        self.assertIn('Host: EXPECTED_SANDBOX', screen)
+        self.assertIn('Path: EXPECTED_AUTHORIZE_PATH', screen)
+        self.assertIn('Query parameter count: 6', screen)
+        self.assertIn('state matches prepared flow: MATCH', screen)
+        self.assertIn('URL matches prepared flow: MATCH', screen)
+        self.assertIn('encode/decode semantic roundtrip: YES', screen)
+        self.assertIs(diagnose.call_args.args[0], link.call_args.args[1])
         url = self.fake.session_state['_sandbox_oauth_consent_url']
         state = state_from(url)
         for forbidden in (config.client_id, config.client_secret, config.redirect_name,
