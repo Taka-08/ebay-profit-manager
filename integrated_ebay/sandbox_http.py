@@ -48,7 +48,8 @@ class SandboxHTTP:
 
     def request(self, method, path, *, token='', body=None, headers=None, write=False):
         sandbox_guard()
-        allowed = ((method == 'GET' and re.fullmatch(r'/sell/inventory/v1/(offer(?:\?sku=[^#]+|/[0-9]+)|inventory_item/[^/?#]+)', path))
+        allowed = ((method == 'GET' and not write and (path == '/sell/inventory/v1/getVersion'
+                    or re.fullmatch(r'/sell/inventory/v1/(offer(?:\?sku=[^#]+|/[0-9]+)|inventory_item/[^/?#]+)', path)))
                    or (method == 'POST' and path in ('/identity/v1/oauth2/token', '/ws/api.dll'))
                    or (method == 'POST' and write and (path == '/sell/inventory/v1/bulk_update_price_quantity'
                        or re.fullmatch(r'/sell/inventory/v1/offer/[0-9]+/withdraw', path))))

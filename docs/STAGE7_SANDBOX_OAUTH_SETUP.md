@@ -57,7 +57,8 @@ A protected local Secrets file must be outside OneDrive/Git.
 - `EBAY_SANDBOX_REFRESH_TOKEN`
 
 The SCOPES entry is a space-separated string of the two exact scope URLs above.
-Leave `EBAY_SANDBOX_ACCESS_TOKEN` unset for refresh-based operation. Never reuse the
+Leave `EBAY_SANDBOX_USER_ACCESS_TOKEN` unset for refresh-based operation. The older
+`EBAY_SANDBOX_ACCESS_TOKEN` key is not used by the Sandbox settings loader. Never reuse the
 previously exposed token. RuName is required for the initial code exchange, not for
 the refresh grant. This change does not implement timed Access Token renewal.
 

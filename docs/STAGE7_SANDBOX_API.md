@@ -82,12 +82,22 @@ Required environment variables or existing `[ebay]` secret keys (values delibera
 
 - `EBAY_EXECUTION_MODE=SANDBOX`, `EBAY_ENVIRONMENT=SANDBOX`, `EBAY_ENABLE_SANDBOX_API=true`.
 - `EBAY_ENABLE_PRODUCTION_WRITES=false` (default false; true still cannot unlock Production).
-- `EBAY_SANDBOX_ACCESS_TOKEN`, or CLIENT_ID + CLIENT_SECRET + REFRESH_TOKEN under the same Sandbox prefix.
+- `EBAY_SANDBOX_USER_ACCESS_TOKEN` for a newly issued, short-lived Developer Portal Sandbox User token,
+  or CLIENT_ID + CLIENT_SECRET + REFRESH_TOKEN under the same Sandbox prefix. The short-lived token
+  takes precedence while present; the older `EBAY_SANDBOX_ACCESS_TOKEN` key is not read from Secrets.
+  Do not reuse any token previously exposed in a screenshot. Never paste a token into source, tests, or logs.
 - `EBAY_SANDBOX_SCOPES`: space-separated `https://api.ebay.com/oauth/api_scope` and
   `https://api.ebay.com/oauth/api_scope/sell.inventory`, actually granted via seller consent.
 - `EBAY_SANDBOX_SELLER_EIAS`, `EBAY_SANDBOX_SELLER_USER_ID`: independently verified test account.
 - `EBAY_SANDBOX_ALLOWED_OFFER_IDS`: comma-separated explicit test Offer IDs.
 - Optional `EBAY_SANDBOX_REDIRECT_NAME`: Sandbox RuName for manual developer-portal consent.
+
+For the Developer Portal short-token path, before binding a test Offer or attempting any change, call
+`OAuthClient(OAuthSettings.load('SANDBOX')).verify_sandbox_user_access_token()` only after the
+new Sandbox token and explicit Sandbox guard settings are in place. This performs one GET to the
+fixed Sandbox Inventory `getVersion` endpoint, touches no DB, does not refresh a token, and returns
+only a success flag. A missing/expired token fails closed; there is no Production fallback. The
+separate, unresolved Streamlit OAuth authorization error does not need to be retried for this check.
 
 Obtain Sandbox keyset, test seller and seller User OAuth grant in the eBay Developer portal. No interactive
 authorization-code callback or new token storage is built into the public app. The existing OAuthClient's

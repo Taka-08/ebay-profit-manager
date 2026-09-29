@@ -47,9 +47,9 @@ class OAuthSettings:
             key = f'EBAY_{environment}_{name}'
             return os.environ.get(key) or _secret_value(key, 'ebay') or ''
         scopes = tuple(value('SCOPES').split())
-        return cls(environment, *(value(name) for name in
-                   ('CLIENT_ID', 'CLIENT_SECRET', 'REFRESH_TOKEN', 'ACCESS_TOKEN', 'REDIRECT_NAME')),
-                   scopes=scopes)
+        return cls(environment, value('CLIENT_ID'), value('CLIENT_SECRET'), value('REFRESH_TOKEN'),
+                   value('USER_ACCESS_TOKEN') if environment == 'SANDBOX' else value('ACCESS_TOKEN'),
+                   value('REDIRECT_NAME'), scopes=scopes)
 
 
 class OAuthClient:
@@ -63,6 +63,22 @@ class OAuthClient:
         """Prepare a separate, OAuth-only consent flow; never enable listing APIs."""
         from .sandbox_oauth import SandboxConsent
         return SandboxConsent(self._settings)
+
+    def verify_sandbox_user_access_token(self):
+        """Read-only Sandbox check for a manually issued short-lived User token."""
+        from .sandbox_http import sandbox_guard, SandboxHTTP, REQUIRED_SCOPES
+        sandbox_guard()
+        s = self._settings
+        if (s.environment != 'SANDBOX' or not isinstance(s.access_token, str) or not s.access_token
+                or s.access_token != s.access_token.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in s.access_token)
+                or not set(REQUIRED_SCOPES).issubset(s.scopes)):
+            raise PublicationError('DISABLED', 'Sandboxの短期User Token設定を確認してください。')
+        result = SandboxHTTP().request('GET', '/sell/inventory/v1/getVersion',
+                                       token=s.access_token, write=False)
+        if not isinstance(result, dict) or not isinstance(result.get('version'), str) or not result['version']:
+            raise PublicationError('READ_FAILED', 'Sandboxの読み取り確認に失敗しました。')
+        return True
 
     def refresh_access_token(self):
         import base64
