@@ -66,19 +66,15 @@ class OAuthClient:
 
     def verify_sandbox_user_access_token(self):
         """Read-only Sandbox check for a manually issued short-lived User token."""
-        from .sandbox_http import sandbox_guard, SandboxHTTP, REQUIRED_SCOPES
-        sandbox_guard()
+        from .sandbox_http import SandboxHTTP, REQUIRED_SCOPES, sandbox_read_probe_guard
+        sandbox_read_probe_guard()
         s = self._settings
         if (s.environment != 'SANDBOX' or not isinstance(s.access_token, str) or not s.access_token
                 or s.access_token != s.access_token.strip()
                 or any(ord(char) < 32 or ord(char) == 127 for char in s.access_token)
                 or not set(REQUIRED_SCOPES).issubset(s.scopes)):
             raise PublicationError('DISABLED', 'Sandboxの短期User Token設定を確認してください。')
-        result = SandboxHTTP().request('GET', '/sell/inventory/v1/getVersion',
-                                       token=s.access_token, write=False)
-        if not isinstance(result, dict) or not isinstance(result.get('version'), str) or not result['version']:
-            raise PublicationError('READ_FAILED', 'Sandboxの読み取り確認に失敗しました。')
-        return True
+        return SandboxHTTP().get_version_read_only(s.access_token)
 
     def refresh_access_token(self):
         import base64

@@ -4,10 +4,11 @@ import os
 import secrets
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from integrated_ebay.ebay_api import OAuthClient, OAuthSettings
 from integrated_ebay.publication_provider import PublicationError
-from integrated_ebay.sandbox_http import REQUIRED_SCOPES, SandboxHTTP
+from integrated_ebay.sandbox_http import REQUIRED_SCOPES, SandboxHTTP, SandboxProbeError
 from integrated_ebay.sandbox_inventory import SandboxInventoryProvider
 
 
@@ -49,14 +50,17 @@ class PortalTokenTests(unittest.TestCase):
 
     def test_first_probe_is_one_read_only_sandbox_call_with_no_db_or_refresh(self):
         settings = OAuthSettings('SANDBOX', access_token=self.token, scopes=REQUIRED_SCOPES)
-        with (patch.dict(os.environ, SANDBOX_ENV, clear=True),
-              patch.object(SandboxHTTP, 'request', return_value={'version': 'fixture-version'}) as request,
+        with (patch.dict(os.environ, {'EBAY_EXECUTION_MODE': 'MOCK'}, clear=True),
+              patch('integrated_ebay.sandbox_http.build_opener') as opener,
               patch('integrated_ebay.ebay_api.OAuthClient.refresh_access_token',
                     side_effect=AssertionError('refresh must not be used')),
               patch('app_database.get_database_connection', side_effect=AssertionError('DB must not be used'))):
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = b'{"version":"fixture"}'
             self.assertTrue(OAuthClient(settings).verify_sandbox_user_access_token())
-        request.assert_called_once_with('GET', '/sell/inventory/v1/getVersion',
-                                        token=self.token, write=False)
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual('GET', request.get_method())
+            self.assertEqual('https://api.sandbox.ebay.com/sell/inventory/v1/getVersion', request.full_url)
+            self.assertEqual(1, opener.return_value.open.call_count)
 
     def test_missing_or_invalid_direct_token_fails_without_fallback(self):
         for token in ('', ' ' + self.token, self.token + '\n'):
@@ -64,24 +68,26 @@ class PortalTokenTests(unittest.TestCase):
                                      access_token=token, scopes=REQUIRED_SCOPES)
             with (self.subTest(token_configured=bool(token)),
                   patch.dict(os.environ, SANDBOX_ENV, clear=True),
-                  patch.object(SandboxHTTP, 'request') as request,
+                  patch.object(SandboxHTTP, 'get_version_read_only') as request,
                   patch('integrated_ebay.ebay_api.OAuthClient.refresh_access_token') as refresh):
                 with self.assertRaises(PublicationError):
                     OAuthClient(settings).verify_sandbox_user_access_token()
                 request.assert_not_called()
                 refresh.assert_not_called()
 
-    def test_production_or_disabled_sandbox_cannot_probe(self):
-        for environment in ('MOCK', 'PRODUCTION'):
-            with (self.subTest(environment=environment),
-                  patch.dict(os.environ, {**SANDBOX_ENV, 'EBAY_EXECUTION_MODE': environment}, clear=True),
-                  patch.object(SandboxHTTP, 'request') as request):
+    def test_production_settings_cannot_probe(self):
+        for overrides in ({'EBAY_EXECUTION_MODE': 'PRODUCTION'},
+                          {'EBAY_ENVIRONMENT': 'PRODUCTION'},
+                          {'EBAY_ENABLE_PRODUCTION_WRITES': 'true'}):
+            with (self.subTest(overrides=overrides),
+                  patch.dict(os.environ, {**SANDBOX_ENV, **overrides}, clear=True),
+                  patch.object(SandboxHTTP, 'get_version_read_only') as request):
                 with self.assertRaises(PublicationError):
                     OAuthClient(OAuthSettings('SANDBOX', access_token=self.token,
                                               scopes=REQUIRED_SCOPES)).verify_sandbox_user_access_token()
                 request.assert_not_called()
         with (patch.dict(os.environ, SANDBOX_ENV, clear=True),
-              patch.object(SandboxHTTP, 'request') as request):
+              patch.object(SandboxHTTP, 'get_version_read_only') as request):
             with self.assertRaises(PublicationError):
                 OAuthClient(OAuthSettings('PRODUCTION', access_token=self.token,
                                           scopes=REQUIRED_SCOPES)).verify_sandbox_user_access_token()
@@ -89,11 +95,24 @@ class PortalTokenTests(unittest.TestCase):
 
     def test_probe_checks_result_and_does_not_expose_token(self):
         settings = OAuthSettings('SANDBOX', access_token=self.token, scopes=REQUIRED_SCOPES)
-        with (patch.dict(os.environ, SANDBOX_ENV, clear=True),
-              patch.object(SandboxHTTP, 'request', return_value={})):
+        with (patch.dict(os.environ, {'EBAY_EXECUTION_MODE': 'MOCK'}, clear=True),
+              patch('integrated_ebay.sandbox_http.build_opener') as opener):
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = b'{}'
             with self.assertRaises(PublicationError) as error:
                 OAuthClient(settings).verify_sandbox_user_access_token()
         self.assertNotIn(self.token, str(error.exception))
+
+    def test_probe_classifies_http_failure_without_exposing_token(self):
+        for failure, expected in ((HTTPError('fixture', 401, 'private error', None, None), '4xx'),
+                                  (HTTPError('fixture', 503, 'private error', None, None), '5xx'),
+                                  (URLError(TimeoutError('private timeout')), 'TIMEOUT')):
+            with (self.subTest(result=expected), patch.dict(os.environ, {'EBAY_EXECUTION_MODE': 'MOCK'}, clear=True),
+                  patch('integrated_ebay.sandbox_http.build_opener') as opener):
+                opener.return_value.open.side_effect = failure
+                with self.assertRaises(SandboxProbeError) as caught:
+                    SandboxHTTP().get_version_read_only(self.token)
+                self.assertEqual(expected, caught.exception.http_result)
+                self.assertNotIn(self.token, str(caught.exception))
 
     def test_http_host_is_fixed_and_get_cannot_be_marked_write(self):
         with patch.dict(os.environ, SANDBOX_ENV, clear=True), patch('integrated_ebay.sandbox_http.build_opener') as opener:

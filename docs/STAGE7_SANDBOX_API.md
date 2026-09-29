@@ -92,12 +92,12 @@ Required environment variables or existing `[ebay]` secret keys (values delibera
 - `EBAY_SANDBOX_ALLOWED_OFFER_IDS`: comma-separated explicit test Offer IDs.
 - Optional `EBAY_SANDBOX_REDIRECT_NAME`: Sandbox RuName for manual developer-portal consent.
 
-For the Developer Portal short-token path, before binding a test Offer or attempting any change, call
-`OAuthClient(OAuthSettings.load('SANDBOX')).verify_sandbox_user_access_token()` only after the
-new Sandbox token and explicit Sandbox guard settings are in place. This performs one GET to the
-fixed Sandbox Inventory `getVersion` endpoint, touches no DB, does not refresh a token, and returns
-only a success flag. A missing/expired token fails closed; there is no Production fallback. The
-separate, unresolved Streamlit OAuth authorization error does not need to be retried for this check.
+For the Developer Portal short-token path, the existing `ebay-sandbox-start` page has a setup-key-
+protected `Sandbox認証を確認（GETのみ）` button. It allows exactly one attempt per Streamlit session even
+while the app remains in MOCK mode. It sends only one fixed GET to the Sandbox Inventory `getVersion`
+endpoint, touches no DB, does not refresh a token, and displays only a fixed HTTP result category.
+The regular Sandbox write guard remains unchanged. A missing/expired token fails closed; there is no
+Production fallback. The separate Streamlit OAuth authorization error does not need to be retried.
 
 Obtain Sandbox keyset, test seller and seller User OAuth grant in the eBay Developer portal. No interactive
 authorization-code callback or new token storage is built into the public app. The existing OAuthClient's

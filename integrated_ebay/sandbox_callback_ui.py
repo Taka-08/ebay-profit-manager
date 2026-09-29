@@ -6,11 +6,12 @@ import time
 
 import streamlit as st
 
-from .ebay_api import MODES, OAuthSettings, execution_mode
+from .ebay_api import MODES, OAuthClient, OAuthSettings, execution_mode
 from .sandbox_callback import sandbox_callback_registry
-from .sandbox_http import REQUIRED_SCOPES, setting
+from .sandbox_http import REQUIRED_SCOPES, SandboxProbeError, setting
 from .sandbox_oauth import OAuthSetupError, authorization_request_diagnostics, validate_settings
 from .sandbox_oauth_diagnostics import diagnostic_scope, mark, new_diagnostic, safe_lines
+from .publication_provider import PublicationError
 
 
 START_PATH = "ebay-sandbox-start"
@@ -135,6 +136,26 @@ def render_start():
         return
 
     supplied = st.text_input("セットアップキー", type="password", autocomplete="off")
+    st.caption("Sandbox Inventory API 読み取り確認")
+    attempted = st.session_state.get("_sandbox_getversion_attempted", False)
+    if st.button("Sandbox認証を確認（GETのみ）", disabled=attempted):
+        if not _authorized(supplied):
+            st.error("確認できませんでした。")
+        else:
+            st.session_state["_sandbox_getversion_attempted"] = True
+            try:
+                OAuthClient(settings).verify_sandbox_user_access_token()
+            except SandboxProbeError as exc:
+                st.session_state["_sandbox_getversion_result"] = ("FAILED", exc.http_result)
+            except PublicationError:
+                st.session_state["_sandbox_getversion_result"] = ("FAILED", "NOT ATTEMPTED")
+            except Exception:
+                st.session_state["_sandbox_getversion_result"] = ("FAILED", "OTHER")
+            else:
+                st.session_state["_sandbox_getversion_result"] = ("SUCCESS", "2xx")
+    result = st.session_state.get("_sandbox_getversion_result")
+    if result:
+        st.caption(f"Sandbox getVersion: {result[0]} / HTTP: {result[1]}")
     if st.button("Sandbox同意リンクを準備"):
         if not _authorized(supplied):
             st.error("確認できませんでした。")

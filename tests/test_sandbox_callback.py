@@ -15,7 +15,7 @@ from ebay_listing_manager import streamlit_app as manager
 from integrated_ebay import sandbox_callback_ui as ui
 from integrated_ebay.ebay_api import OAuthSettings
 from integrated_ebay.sandbox_callback import SandboxCallbackRegistry
-from integrated_ebay.sandbox_http import REQUIRED_SCOPES, SandboxHTTP
+from integrated_ebay.sandbox_http import REQUIRED_SCOPES, SandboxHTTP, SandboxProbeError
 from integrated_ebay.sandbox_oauth import OAuthSetupError
 from integrated_ebay.sandbox_oauth_diagnostics import diagnostic_scope, mark, new_diagnostic, safe_lines
 
@@ -70,8 +70,8 @@ class FakeStreamlit:
         self.inputs.append((label, kwargs))
         return self.supplied
 
-    def button(self, label, on_click=None):
-        clicked = label in self.clicked
+    def button(self, label, on_click=None, disabled=False):
+        clicked = label in self.clicked and not disabled
         if clicked and on_click is not None:
             on_click()
         return clicked
@@ -288,9 +288,39 @@ class CallbackPageTests(unittest.TestCase):
         with (patch.object(ui.OAuthSettings, 'load', return_value=settings()),
               patch.object(self.registry, 'begin') as begin):
             ui.render_start()
-        self.assertEqual(['eBay Sandbox OAuth'], self.fake.screen)
+        self.assertEqual(['eBay Sandbox OAuth', 'Sandbox Inventory API 読み取り確認'], self.fake.screen)
         self.assertEqual('セットアップキー', self.fake.inputs[0][0])
         begin.assert_not_called()
+
+    def test_read_only_button_needs_setup_key_and_runs_once_without_oauth_or_db(self):
+        self.fake.clicked.add('Sandbox認証を確認（GETのみ）')
+        with (patch.object(ui.OAuthSettings, 'load', return_value=settings()),
+              patch.object(ui.OAuthClient, 'verify_sandbox_user_access_token', return_value=True) as probe,
+              patch.object(self.registry, 'begin') as begin,
+              patch.object(SandboxHTTP, 'exchange_authorization_code') as exchange):
+            ui.render_start()
+            probe.assert_not_called()
+            self.fake.supplied = 'x' * 40
+            ui.render_start()
+            ui.render_start()
+            probe.assert_called_once_with()
+            begin.assert_not_called()
+            exchange.assert_not_called()
+        self.assertIn('Sandbox getVersion: SUCCESS / HTTP: 2xx', self.fake.screen)
+
+    def test_read_only_failure_shows_fixed_status_and_never_exposes_exception(self):
+        self.fake.clicked.add('Sandbox認証を確認（GETのみ）')
+        self.fake.supplied = 'x' * 40
+        with (patch.object(ui.OAuthSettings, 'load', return_value=settings()),
+              patch.object(ui.OAuthClient, 'verify_sandbox_user_access_token',
+                           side_effect=SandboxProbeError('READ_FAILED', 'private-token-marker', '4xx')),
+              patch('sys.stdout', new_callable=io.StringIO) as stdout,
+              patch('sys.stderr', new_callable=io.StringIO) as stderr):
+            ui.render_start()
+        self.assertIn('Sandbox getVersion: FAILED / HTTP: 4xx', self.fake.screen)
+        for output in ('\n'.join(self.fake.screen), stdout.getvalue(), stderr.getvalue()):
+            self.assertNotIn('private-token-marker', output)
+            self.assertNotIn(self.fake.supplied, output)
 
     def test_prepared_request_shows_only_statuses_before_link_without_network(self):
         config = settings()

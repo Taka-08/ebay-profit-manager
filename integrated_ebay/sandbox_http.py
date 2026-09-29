@@ -28,12 +28,51 @@ def sandbox_guard():
         raise PublicationError('DISABLED', 'Sandbox通信は明示設定が必要です。Production通信は禁止しています。')
 
 
+def sandbox_read_probe_guard():
+    from .ebay_api import execution_mode
+    if (execution_mode() == 'PRODUCTION' or setting('EBAY_ENVIRONMENT').upper() not in ('', 'SANDBOX')
+            or setting('EBAY_ENABLE_PRODUCTION_WRITES').lower() not in ('', 'false')):
+        raise PublicationError('DISABLED', 'Sandbox読み取り確認はProduction設定では実行できません。')
+
+
+class SandboxProbeError(PublicationError):
+    def __init__(self, code, message, http_result):
+        super().__init__(code, message)
+        self.http_result = http_result
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
 
 
 class SandboxHTTP:
+    def get_version_read_only(self, token):
+        """One fixed Sandbox GET; independent of the write-capable Sandbox mode."""
+        sandbox_read_probe_guard()
+        if (not isinstance(token, str) or not token or token != token.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in token)):
+            raise SandboxProbeError('DISABLED', 'Sandboxの短期User Token設定を確認してください。', 'NOT ATTEMPTED')
+        request = Request('https://api.sandbox.ebay.com/sell/inventory/v1/getVersion',
+                          headers={'Authorization': 'Bearer ' + token}, method='GET')
+        try:
+            with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=20) as response:
+                raw = response.read(2_000_001)
+        except HTTPError as exc:
+            status = '4xx' if 400 <= exc.code < 500 else '5xx' if 500 <= exc.code < 600 else 'OTHER'
+            raise SandboxProbeError('READ_FAILED', 'Sandbox認証を確認できませんでした。', status) from None
+        except Exception as exc:
+            timeout = isinstance(exc, TimeoutError) or isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)
+            raise SandboxProbeError('READ_FAILED', 'Sandbox通信を確認できませんでした。',
+                                    'TIMEOUT' if timeout else 'OTHER') from None
+        try:
+            result = json.loads(raw) if len(raw) <= 2_000_000 else None
+            if not isinstance(result, dict) or not isinstance(result.get('version'), str) or not result['version']:
+                raise ValueError()
+        except (ValueError, UnicodeError):
+            raise SandboxProbeError('READ_FAILED', 'Sandboxの読み取り結果を確認できませんでした。', '2xx') from None
+        return True
+
     def exchange_authorization_code(self, settings, code):
         # This capability has one fixed endpoint, independent of Inventory API flags.
         from .sandbox_oauth import validate_settings, validate_code
